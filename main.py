@@ -1,6 +1,8 @@
 import telebot
 import sqlite3
 from datetime import date, datetime
+import gspread
+from google.oauth2.service_account import Credentials
 
 bot = telebot.TeleBot('6197503153:AAHX9Yz5w1bpDs7v3KlplIye1hg9JVrFQlc')
 role = None
@@ -15,6 +17,8 @@ contest_name = None
 start_date = None
 end_date = None
 max_organizers = 1
+
+CREDENTIALS_FILE = 'hip-cyclist-390715-4d2ca1d8bc7c.json'
 
 
 class Database:
@@ -205,11 +209,16 @@ db = Database('test1.db')
 
 @bot.message_handler(commands=['start', 'help'])
 def handle_start_help(message):
-    db.create_table()
-    if db.user_exists(message):
-        bot.send_message(message.chat.id, 'Ви вже зареєстровані!')
-    else:
-        bot.reply_to(message, 'Привіт! Я бот реєстрації користувачів для конкурсів. Для реєстрації введіть /register')
+    markup = telebot.types.InlineKeyboardMarkup()
+    link_button = telebot.types.InlineKeyboardButton("Get Spreadsheet Link", callback_data='get_link')
+    markup.add(link_button)
+    bot.send_message(message.chat.id,
+                     'Click the button to get the link to an empty Google Spreadsheet', reply_markup=markup)
+    # db.create_table()
+    # if db.user_exists(message):
+    #     bot.send_message(message.chat.id, 'Ви вже зареєстровані!')
+    # else:
+    #     bot.reply_to(message, 'Привіт! Я бот реєстрації користувачів для конкурсів. Для реєстрації введіть /register')
 
 
 @bot.message_handler(commands=['register'])
@@ -417,81 +426,90 @@ def handle_callback_query(call):
     global role
     global check
     global name
-    if call.data == 'viewer':
-        role = 'viewer'
-        db.create_table_viewer()
-        bot.send_message(call.message.chat.id, 'Введіть Ваш нікнейм.')
-        bot.register_next_step_handler(call.message, process_nickname_step)
-    elif call.data == 'organizer':
-        role = 'organizer'
-        db.create_table_organizer()
-        bot.send_message(call.message.chat.id, 'Введіть Ваше ім\'я!')
-        bot.register_next_step_handler(call.message, process_name_step)
-        return
-    elif call.data == 'jury':
-        role = 'jury'
-        db.create_table_jury()
-        bot.send_message(call.message.chat.id, 'Введіть Ваше ім\'я!')
-        bot.register_next_step_handler(call.message, process_name_step)
-        return
-    elif call.data == 'participant':
-        role = 'participant'
-        db.create_table_participant()
-        bot.send_message(call.message.chat.id, 'Введіть команду, яку Ви представляєте.')
-        bot.register_next_step_handler(call.message, process_team_step)
-        return
-    if call.data == 'yes':
-        check = True
-        bot.send_message(call.message.chat.id, 'Введіть компанію, яку Ви представляєте.')
-        bot.register_next_step_handler(call.message, process_company_step)
-        return
-    elif call.data == 'no':
-        process_contest_step(call.message)
-        return
+    if call.data == 'get_link':
+        credentials = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=['https://www.googleapis.com/auth/spreadsheets'])
+        gc = gspread.authorize(credentials)
+        spreadsheet = gc.create("Empty Table")
+        worksheet = spreadsheet.sheet1
+        # Send the link to the user
+        link = spreadsheet.url
+        bot.reply_to(call.message, f"Here's the link to the empty table: {link}")
 
-    if call.data == 'add_contest':
-        bot.send_message(call.message.chat.id, 'Введіть назву конкурсу.')
-        bot.register_next_step_handler(call.message, process_contest_name_step)
-    elif call.data == 'join_contest':
-        process_contest_step(call.message)
-
-    if call.data == 'start_registration':
-        if db.is_organizer(call.message):
-            db.start_registration()
-            bot.send_message(call.message.chat.id, 'Реєстрація на цей конкурс почалась!')
-            start_voting(call.message)
-        else:
-            bot.send_message(call.message.chat.id, 'Тільки організатори можуть почати реєстрацію.')
-    elif call.data == 'dont_start_registration':
-        bot.send_message(call.message.chat.id, 'Введіть /startregistration , коли захочете почати реєстрацію!')
-
-    if call.data == 'start_voting':
-        if db.is_organizer(call.message):
-            db.end_registration()
-            db.start_voting()
-            bot.send_message(call.message.chat.id, 'Голосування почалось!')
-            send_messages(call.message)
-        else:
-            bot.send_message(call.message.chat.id, 'Тільки організатори можуть почати реєстрацію.')
-    elif call.data == 'dont_start_voting':
-        bot.send_message(call.message.chat.id, 'Введіть /startvoting , коли захочете почати голосування!')
-
-    if call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'jury':
-        contest_id = int(call.data.split('_')[2])
-        add(call.message)
-        db.set_id_jury(call.message, contest_id)
-    elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'participant':
-        contest_id = int(call.data.split('_')[2])
-        add(call.message)
-        db.set_id_participant(call.message, contest_id)
-    elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'viewer':
-        contest_id = int(call.data.split('_')[2])
-        add(call.message)
-        db.set_id_viewer(call.message, contest_id)
-    elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'organizer':
-        contest_id = int(call.data.split('_')[2])
-        add(call.message)
-        db.set_id_organizer(call.message, contest_id)
+    # if call.data == 'viewer':
+    #     role = 'viewer'
+    #     db.create_table_viewer()
+    #     bot.send_message(call.message.chat.id, 'Введіть Ваш нікнейм.')
+    #     bot.register_next_step_handler(call.message, process_nickname_step)
+    # elif call.data == 'organizer':
+    #     role = 'organizer'
+    #     db.create_table_organizer()
+    #     bot.send_message(call.message.chat.id, 'Введіть Ваше ім\'я!')
+    #     bot.register_next_step_handler(call.message, process_name_step)
+    #     return
+    # elif call.data == 'jury':
+    #     role = 'jury'
+    #     db.create_table_jury()
+    #     bot.send_message(call.message.chat.id, 'Введіть Ваше ім\'я!')
+    #     bot.register_next_step_handler(call.message, process_name_step)
+    #     return
+    # elif call.data == 'participant':
+    #     role = 'participant'
+    #     db.create_table_participant()
+    #     bot.send_message(call.message.chat.id, 'Введіть команду, яку Ви представляєте.')
+    #     bot.register_next_step_handler(call.message, process_team_step)
+    #     return
+    # if call.data == 'yes':
+    #     check = True
+    #     bot.send_message(call.message.chat.id, 'Введіть компанію, яку Ви представляєте.')
+    #     bot.register_next_step_handler(call.message, process_company_step)
+    #     return
+    # elif call.data == 'no':
+    #     process_contest_step(call.message)
+    #     return
+    #
+    # if call.data == 'add_contest':
+    #     bot.send_message(call.message.chat.id, 'Введіть назву конкурсу.')
+    #     bot.register_next_step_handler(call.message, process_contest_name_step)
+    # elif call.data == 'join_contest':
+    #     process_contest_step(call.message)
+    #
+    # if call.data == 'start_registration':
+    #     if db.is_organizer(call.message):
+    #         db.start_registration()
+    #         bot.send_message(call.message.chat.id, 'Реєстрація на цей конкурс почалась!')
+    #         start_voting(call.message)
+    #     else:
+    #         bot.send_message(call.message.chat.id, 'Тільки організатори можуть почати реєстрацію.')
+    # elif call.data == 'dont_start_registration':
+    #     bot.send_message(call.message.chat.id, 'Введіть /startregistration , коли захочете почати реєстрацію!')
+    #
+    # if call.data == 'start_voting':
+    #     if db.is_organizer(call.message):
+    #         db.end_registration()
+    #         db.start_voting()
+    #         bot.send_message(call.message.chat.id, 'Голосування почалось!')
+    #         send_messages(call.message)
+    #     else:
+    #         bot.send_message(call.message.chat.id, 'Тільки організатори можуть почати реєстрацію.')
+    # elif call.data == 'dont_start_voting':
+    #     bot.send_message(call.message.chat.id, 'Введіть /startvoting , коли захочете почати голосування!')
+    #
+    # if call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'jury':
+    #     contest_id = int(call.data.split('_')[2])
+    #     add(call.message)
+    #     db.set_id_jury(call.message, contest_id)
+    # elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'participant':
+    #     contest_id = int(call.data.split('_')[2])
+    #     add(call.message)
+    #     db.set_id_participant(call.message, contest_id)
+    # elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'viewer':
+    #     contest_id = int(call.data.split('_')[2])
+    #     add(call.message)
+    #     db.set_id_viewer(call.message, contest_id)
+    # elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'organizer':
+    #     contest_id = int(call.data.split('_')[2])
+    #     add(call.message)
+    #     db.set_id_organizer(call.message, contest_id)
 
 
 bot.polling()
