@@ -52,7 +52,7 @@ class Database:
         self.connection.commit()
 
     def get_active_contests(self):
-        self.cursor.execute("SELECT name, start_date FROM contests WHERE start_date < date('now') AND end_date > date('now')")
+        self.cursor.execute("SELECT id, name, start_date FROM contests WHERE start_date < date('now') AND end_date > date('now') AND registration_started = 1")
         return self.cursor.fetchall()
 
     def get_number_organizer_of_contest(self):
@@ -149,25 +149,17 @@ class Database:
         else:
             bot.send_message(message.chat.id, 'Конкурс не знайдено!')
 
-    def set_id_jury(self, message):
-        self.cursor.execute("SELECT id FROM contests WHERE name = ? AND start_date = ?", (contest_name, start_date))
-        result = self.cursor.fetchone()
-        if result:
-            contest_id = result[0]
-            self.cursor.execute("UPDATE jury SET contest_id = ? WHERE id = ?", (contest_id, message.chat.id))
-            self.connection.commit()
-        else:
-            bot.send_message(message.chat.id, 'Конкурс не знайдено!')
+    def set_id_jury(self, message, contest_id):
+        self.cursor.execute("UPDATE jury SET contest_id = ? WHERE id = ?", (contest_id, message.chat.id))
+        self.connection.commit()
 
-    def set_id_participant(self, message):
-        self.cursor.execute("SELECT id FROM contests WHERE name = ? AND start_date = ?", (contest_name, start_date))
-        result = self.cursor.fetchone()
-        if result:
-            contest_id = result[0]
-            self.cursor.execute("UPDATE participants SET contest_id = ? WHERE id = ?", (contest_id, message.chat.id))
-            self.connection.commit()
-        else:
-            bot.send_message(message.chat.id, 'Конкурс не знайдено!')
+    def set_id_participant(self, message, contest_id):
+        self.cursor.execute("UPDATE participants SET contest_id = ? WHERE id = ?", (contest_id, message.chat.id))
+        self.connection.commit()
+
+    def set_id_viewer(self, message, contest_id):
+        self.cursor.execute("UPDATE viewer SET contest_id = ? WHERE id = ?", (contest_id, message.chat.id))
+        self.connection.commit()
 
     def is_organizer(self, message):
         return bool(self.cursor.execute("SELECT id FROM organizers WHERE id = ?", (message.chat.id,)))
@@ -232,7 +224,6 @@ def process_lastname_step(message):
 def process_company_step(message):
     global company
     company = message.text
-    bot.reply_to(message, 'Виберіть конкурс, до якого хочете доєднатись.\nНадішліть число із списку!')
     process_contest_step(message)
 
 
@@ -250,12 +241,37 @@ def process_nickname_step(message):
     bot.register_next_step_handler(message, process_password_step)
 
 
+# def process_contest_step(message):
+#     list_contests(message)
+#     if db.get_jury_contest(message):
+#         add(message)
+#     elif db.get_participant_contest(message):
+#         add(message)
+
+
 def process_contest_step(message):
-    list_contests(message)
-    if db.get_jury_contest(message):
-        add(message)
-    elif db.get_participant_contest(message):
-        add(message)
+    active_contests = db.get_active_contests()
+    if len(active_contests) > 0:
+        markup = telebot.types.InlineKeyboardMarkup()
+        for contest in active_contests:
+            contest_button = telebot.types.InlineKeyboardButton(contest[1], callback_data=f'join_contest_{contest[0]}')
+            markup.add(contest_button)
+        bot.send_message(message.chat.id, 'Оберіть конкурс, до якого хочете приєднатись:', reply_markup=markup)
+    else:
+        bot.send_message(message.chat.id, 'Наразі немає активних конкурсів.')
+
+
+# def list_contests(message):
+#     contests = db.get_active_contests()
+#     i = 0
+#     info = ''
+#     for contest in contests:
+#         i += 1
+#         info += str(i) + f'. {contest[0]}\n'
+#
+#     bot.send_message(message.chat.id, info)
+#     bot.register_next_step_handler(message, join_contest, contests)
+#     # join_contest(message, contests)
 
 
 def process_password_step(message):
@@ -268,9 +284,8 @@ def process_password_step(message):
         no_button = telebot.types.InlineKeyboardButton('Ні', callback_data='no')
         markup.add(yes_button, no_button)
         bot.send_message(message.chat.id, 'Ви представляєте якусь компанію?', reply_markup=markup)
-    elif role == 'participant':
-        bot.reply_to(message, 'Виберіть конкурс, до якого хочете доєднатись.\nНадішліть число із списку!')
-        bot.register_next_step_handler(message, process_contest_step)
+    elif role == 'participant' or role == 'viewer':
+        process_contest_step(message)
     else:
         add(message)
 
@@ -383,6 +398,7 @@ def opportunity_join():
 def handle_callback_query(call):
     global role
     global check
+    global name
     if call.data == 'viewer':
         role = 'viewer'
         db.create_table_viewer()
@@ -398,18 +414,22 @@ def handle_callback_query(call):
         db.create_table_jury()
         bot.send_message(call.message.chat.id, 'Введіть Ваше ім\'я!')
         bot.register_next_step_handler(call.message, process_name_step)
+        return
     elif call.data == 'participant':
         role = 'participant'
         db.create_table_participant()
         bot.send_message(call.message.chat.id, 'Введіть команду, яку Ви представляєте.')
         bot.register_next_step_handler(call.message, process_team_step)
+        return
     elif call.data == 'yes':
         check = True
         bot.send_message(call.message.chat.id, 'Введіть компанію, яку Ви представляєте.')
         bot.register_next_step_handler(call.message, process_company_step)
+        return
     elif call.data == 'no':
         bot.reply_to(call.message, 'Виберіть конкурс, до якого хочете доєднатись.\nНадішліть число із списку!')
         process_contest_step(call.message)
+        return
     elif call.data == 'add_contest':
         bot.send_message(call.message.chat.id, 'Введіть назву конкурсу.')
         bot.register_next_step_handler(call.message, process_contest_name_step)
@@ -424,6 +444,18 @@ def handle_callback_query(call):
             bot.send_message(call.message.chat.id, 'Тільки організатори можуть почати реєстрацію.')
     elif call.data == 'dont_start_registration':
         bot.send_message(call.message.chat.id, 'Введіть /startregistration , коли захочете почати реєстрацію!')
+    if call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'jury':
+        contest_id = int(call.data.split('_')[2])
+        add(call.message)
+        db.set_id_jury(call.message, contest_id)
+    elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'participant':
+        contest_id = int(call.data.split('_')[2])
+        add(call.message)
+        db.set_id_participant(call.message, contest_id)
+    elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'viewer':
+        contest_id = int(call.data.split('_')[2])
+        add(call.message)
+        db.set_id_viewer(call.message, contest_id)
 
 
 bot.polling()
