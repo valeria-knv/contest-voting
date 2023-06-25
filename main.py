@@ -1,10 +1,14 @@
+from __future__ import print_function
+
 import telebot
 import sqlite3
 from datetime import date, datetime
-import gspread
-from google.oauth2.service_account import Credentials
+from google.oauth2 import service_account
+from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 bot = telebot.TeleBot('6197503153:AAHX9Yz5w1bpDs7v3KlplIye1hg9JVrFQlc')
+
 role = None
 name = None
 lastname = None
@@ -18,7 +22,35 @@ start_date = None
 end_date = None
 max_organizers = 1
 
-CREDENTIALS_FILE = 'hip-cyclist-390715-4d2ca1d8bc7c.json'
+project_type = None
+custom_criteria_count = None
+
+default_startup_criteria = [
+    'Актуальність і соціальна значимість проєкту',
+    'Детальне технічне опрацювання проєкту',
+    'Конкретність, значимість і досяжність результатів проєкту',
+    'Реалістичність і обґрунтованість представленого проєкту',
+    'Економічна ефективність',
+    'Інвестиційна привабливість проєкту'
+]
+
+default_design_criteria = [
+    'Композиція',
+    'Кольорова гама',
+    'Чистота виконаної роботи',
+    'Деталізація',
+    'Перспектива',
+    'Актуальність',
+    'Складність',
+    'Креативність',
+    'Презентація',
+    'Оригінальність'
+]
+
+current_criteria = []
+criterion_index = 0
+
+CREDENTIALS_FILE = 'credentials2.json'
 
 
 class Database:
@@ -37,6 +69,15 @@ class Database:
             self.connection.commit()
         except sqlite3.IntegrityError:
             bot.send_message(message.chat.id, 'Ви вже зареєстровані!')
+
+    def create_table_criteria(self):
+        self.cursor.execute("CREATE TABLE IF NOT EXISTS criteria (id INTEGER, name TEXT, contest_id INTEGER, PRIMARY KEY(id, contest_id))")
+        self.connection.commit()
+
+    def set_name_criteria(self, message, criteria, crit_id):
+        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        self.cursor.execute("INSERT INTO criteria (id, name, contest_id) VALUES (?, ?, ?)", (crit_id, criteria, contest_id))
+        self.connection.commit()
 
     def create_table_contest(self):
         self.cursor.execute("CREATE TABLE IF NOT EXISTS contests (id INTEGER PRIMARY KEY, name TEXT NOT NULL, "
@@ -203,22 +244,41 @@ class Database:
         else:
             return 0
 
+    def get_number_of_participants(self, message):
+        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT COUNT(id) FROM participants WHERE contest_id = ?", (contest_id,)).fetchone()[0]
+
+    def get_number_of_criteria(self, message):
+        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT COUNT(id) FROM criteria WHERE contest_id = ?", (contest_id,)).fetchone()[0]
+
+    def get_number_of_jury(self, message):
+        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT COUNT(id) FROM jury WHERE contest_id = ?", (contest_id,)).fetchone()[0]
+
+    def get_list_of_participants(self, message):
+        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT team FROM participants WHERE contest_id = ?", (contest_id,)).fetchall()
+
+    def get_list_of_criteria(self, message):
+        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT name FROM criteria WHERE contest_id = ?", (contest_id,)).fetchall()
+
+    def get_list_of_jury(self, message):
+        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT lastname FROM jury WHERE contest_id = ?", (contest_id,)).fetchall()
+
 
 db = Database('test1.db')
 
 
 @bot.message_handler(commands=['start', 'help'])
 def handle_start_help(message):
-    markup = telebot.types.InlineKeyboardMarkup()
-    link_button = telebot.types.InlineKeyboardButton("Get Spreadsheet Link", callback_data='get_link')
-    markup.add(link_button)
-    bot.send_message(message.chat.id,
-                     'Click the button to get the link to an empty Google Spreadsheet', reply_markup=markup)
-    # db.create_table()
-    # if db.user_exists(message):
-    #     bot.send_message(message.chat.id, 'Ви вже зареєстровані!')
-    # else:
-    #     bot.reply_to(message, 'Привіт! Я бот реєстрації користувачів для конкурсів. Для реєстрації введіть /register')
+    db.create_table()
+    if db.user_exists(message):
+        bot.send_message(message.chat.id, 'Ви вже зареєстровані!')
+    else:
+        bot.reply_to(message, 'Привіт! Я бот реєстрації користувачів для конкурсів. Для реєстрації введіть /register')
 
 
 @bot.message_handler(commands=['register'])
@@ -245,6 +305,11 @@ def handle_start_registration(message):
 @bot.message_handler(commands=['startvoting'])
 def handle_start_voting(message):
     start_voting(message)
+
+
+@bot.message_handler(commands=['criteria'])
+def handle_start_voting(message):
+    start_criteria(message)
 
 
 def process_name_step(message):
@@ -358,6 +423,7 @@ def process_max_organizers_step(message):
         add_contest(message)
     except ValueError:
         bot.send_message(message.chat.id, 'Невірне значення кількості організаторів!')
+        process_max_organizers_step(message)
 
 
 def add_contest(message):
@@ -402,6 +468,117 @@ def opportunity_join():
     return True
 
 
+def add_criteria(message):
+    markup = telebot.types.InlineKeyboardMarkup()
+    start_button = telebot.types.InlineKeyboardButton('Додати критерії', callback_data='add_criteria')
+    no_start_button = telebot.types.InlineKeyboardButton('Пізніше', callback_data='dont_add_criteria')
+    markup.add(start_button, no_start_button)
+    bot.send_message(message.chat.id, 'Чи хочете Ви додати критерії?', reply_markup=markup)
+
+
+def start_criteria(message):
+    markup = telebot.types.InlineKeyboardMarkup()
+    startup_button = telebot.types.InlineKeyboardButton('Критерії стартапу', callback_data='process_startup_criteria')
+    design_button = telebot.types.InlineKeyboardButton('Критерії дизайну', callback_data='process_design_criteria')
+    create_button = telebot.types.InlineKeyboardButton('Створити нові', callback_data='create_criteria')
+    markup.add(startup_button, design_button, create_button)
+    bot.send_message(message.chat.id, 'Налаштуйте критерії конкурсу:', reply_markup=markup)
+
+
+def criteria_as_string(criteria):
+    return "\n".join([f"{i + 1}. {cri_name};" for i, cri_name in enumerate(criteria)])
+
+
+def show_current_criteria(message, criteria):
+    markup = telebot.types.InlineKeyboardMarkup()
+    leave_button = telebot.types.InlineKeyboardButton('Залишити поточні', callback_data='leave_criteria')
+    change_button = telebot.types.InlineKeyboardButton('Змінити', callback_data='change_criteria')
+    create_button = telebot.types.InlineKeyboardButton('Створити нові', callback_data='create_criteria')
+    markup.add(leave_button, change_button, create_button)
+    bot.send_message(message.chat.id, 'Поточні критерії: \n\n' + criteria_as_string(criteria) + '\n\nЧи влаштовують вони Вас?', reply_markup=markup)
+
+
+def request_count_of_criteria(message):
+    global current_criteria
+    current_criteria = []
+    bot.reply_to(message, 'Введіть кількість критеріїв:')
+    bot.register_next_step_handler(message, save_count_of_criteria)
+
+
+def save_count_of_criteria(message):
+    global custom_criteria_count
+    try:
+        custom_criteria_count = int(message.text)
+        if custom_criteria_count <= 0:
+            raise
+    except ValueError:
+        bot.reply_to(message, 'Вказана кількість критеріїв не валідна, спробуйте ще раз:')
+        bot.register_next_step_handler(message, save_count_of_criteria)
+        return
+
+    ask_criterion(message)
+
+
+def ask_criterion(message):
+    global criterion_index
+    msg = bot.send_message(message.chat.id, f'Введіть критерій під номером {criterion_index + 1}:')
+    bot.register_next_step_handler(msg, save_criterion)
+
+
+def save_criterion(message):
+    global criterion_index
+    global current_criteria
+    current_criteria += [message.text]
+
+    criterion_index += 1
+    msg = bot.send_message(message.chat.id, f'Критерій збережено: \n{criterion_index}. {message.text}')
+    if criterion_index == custom_criteria_count:
+        criterion_index = 0
+        show_current_criteria(msg, current_criteria)
+    else:
+        ask_criterion(message)
+
+
+def request_criteria_number(message):
+    global current_criteria
+    msg = bot.send_message(message.chat.id, f'Введіть номер критерію, який хочете змінити:')
+    bot.register_next_step_handler(msg, get_new_criterion_value)
+
+
+def get_new_criterion_value(message):
+    global current_criteria
+    global criterion_index
+    try:
+        criterion_index = int(message.text)
+        if criterion_index - 1 >= len(current_criteria) or criterion_index - 1 < 0:
+            raise
+    except ValueError:
+        bot.reply_to(message, 'Вказаний номер критерію не валідний, спробуйте ще раз:')
+        bot.register_next_step_handler(message, get_new_criterion_value)
+        return
+
+    bot.reply_to(message, f'Введіть нове значення для критерію за номером {criterion_index}:')
+    bot.register_next_step_handler(message, set_new_value_to_criterion)
+
+
+def set_new_value_to_criterion(message):
+    global current_criteria
+    global criterion_index
+    current_criteria[criterion_index - 1] = message.text
+    msg = bot.send_message(message.chat.id, f'Критерій збережено: \n{criterion_index}. {message.text}')
+    criterion_index = 0
+    show_current_criteria(msg, current_criteria)
+
+
+def add_criteria_to_db(message):
+    global current_criteria
+    i = 0
+    for criteria in current_criteria:
+        i += 1
+        db.set_name_criteria(message, str(criteria), i)
+    start_voting(message)
+
+
 def start_voting(message):
     markup = telebot.types.InlineKeyboardMarkup()
     if not check_date(message):
@@ -413,12 +590,113 @@ def start_voting(message):
 
 
 def send_messages(message):
-    ids_jury = db.get_id_jury_from_contest(message)
-    ids_participants = db.get_id_participants_from_contest(message)
-    for id_jury in ids_jury:
-        bot.send_message(int(id_jury[0]), 'Голосування полчалось!')
-    for id_part in ids_participants:
-        bot.send_message(int(id_part[0]), 'Голосування полчалось!')
+    # ids_jury = db.get_id_jury_from_contest(message)
+    # ids_participants = db.get_id_participants_from_contest(message)
+    # for id_jury in ids_jury:
+    #     bot.send_message(int(id_jury[0]), 'Голосування почалось!')
+    # for id_part in ids_participants:
+    #     bot.send_message(int(id_part[0]), 'Голосування почалось!')
+    create('contest voting', message)
+
+
+def create(title, message):
+    creds = service_account.Credentials.from_service_account_file(
+        CREDENTIALS_FILE,
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ],
+    )
+
+    try:
+        service = build('sheets', 'v4', credentials=creds)
+        spreadsheet = {
+            'properties': {
+                'title': title
+            }
+        }
+        spreadsheet = service.spreadsheets().create(body=spreadsheet).execute()
+        spreadsheet_id = spreadsheet.get("spreadsheetId")
+
+        drive = build("drive", "v3", credentials=creds)
+        permission = {
+            "type": "anyone",
+            "role": "writer",
+        }
+        drive.permissions().create(fileId=spreadsheet_id, body=permission).execute()
+
+        link = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit#gid=0"
+        add_value_to_sheet(message, link, spreadsheet_id, service)
+        bot.send_message(message.chat.id, f"Посилання на Google таблицю: {link}")
+    except HttpError as error:
+        print(f"An error occurred: {error}")
+        return error
+
+
+def add_value_to_sheet(message, link, spreadsheet_id, service):
+    number_of_participants = db.get_number_of_participants(message)
+    number_of_criteria = db.get_number_of_criteria(message)
+    number_of_jury = db.get_number_of_jury(message)
+
+    list_of_participants = db.get_list_of_participants(message)
+    list_of_criteria = db.get_list_of_criteria(message)
+    list_of_jury = db.get_list_of_jury(message)
+    data = []
+
+    temp = 1
+    start_col = 2
+    start_row = 1
+    data = [
+        {
+            'range': f"{chr(start_col + 64)}{start_row}",
+            'values': [list_of_participants[0]]
+        }
+    ]
+    for i in range(number_of_participants - 1):
+        start_row += 2 + number_of_jury
+        data.append(
+            {
+                'range': f"{chr(start_col + 64)}{start_row}",
+                'values': [list_of_participants[temp]]
+            }
+        )
+        temp += 1
+
+    start_col = 1
+    start_row = 3
+    values = []
+    for jury in list_of_jury:
+        values.append(jury)
+
+    for i in range(number_of_participants):
+        end_row = start_row + len(values) - 1
+        data.append(
+            {
+                'range': f"{chr(start_col + 64)}{start_row}:{chr(start_col + 64)}{end_row}",
+                'values': values
+            }
+        )
+        start_row += len(values) + 2
+
+    start_col = 2
+    start_row = 2
+    values = [list(criteria[0] for criteria in list_of_criteria)]
+
+    end_col = start_col + number_of_criteria - 1
+    for i in range(number_of_participants):
+        data.append(
+            {
+                'range': f"{chr(start_col + 64)}{start_row}:{chr(end_col + 64)}{start_row}",
+                'values': values
+            }
+        )
+        start_row += number_of_jury + 2
+
+    body = {
+        'valueInputOption': 'USER_ENTERED',
+        'data': data
+    }
+    service.spreadsheets().values().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
 
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -426,90 +704,105 @@ def handle_callback_query(call):
     global role
     global check
     global name
-    if call.data == 'get_link':
-        credentials = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=['https://www.googleapis.com/auth/spreadsheets'])
-        gc = gspread.authorize(credentials)
-        spreadsheet = gc.create("Empty Table")
-        worksheet = spreadsheet.sheet1
-        # Send the link to the user
-        link = spreadsheet.url
-        bot.reply_to(call.message, f"Here's the link to the empty table: {link}")
+    global project_type
+    global current_criteria
+    global default_startup_criteria
+    global default_design_criteria
+    if call.data == 'viewer':
+        role = 'viewer'
+        db.create_table_viewer()
+        bot.send_message(call.message.chat.id, 'Введіть Ваш нікнейм.')
+        bot.register_next_step_handler(call.message, process_nickname_step)
+    elif call.data == 'organizer':
+        role = 'organizer'
+        db.create_table_organizer()
+        bot.send_message(call.message.chat.id, 'Введіть Ваше ім\'я!')
+        bot.register_next_step_handler(call.message, process_name_step)
+        return
+    elif call.data == 'jury':
+        role = 'jury'
+        db.create_table_jury()
+        bot.send_message(call.message.chat.id, 'Введіть Ваше ім\'я!')
+        bot.register_next_step_handler(call.message, process_name_step)
+        return
+    elif call.data == 'participant':
+        role = 'participant'
+        db.create_table_participant()
+        bot.send_message(call.message.chat.id, 'Введіть команду, яку Ви представляєте.')
+        bot.register_next_step_handler(call.message, process_team_step)
+        return
+    if call.data == 'yes':
+        check = True
+        bot.send_message(call.message.chat.id, 'Введіть компанію, яку Ви представляєте.')
+        bot.register_next_step_handler(call.message, process_company_step)
+        return
+    elif call.data == 'no':
+        process_contest_step(call.message)
+        return
 
-    # if call.data == 'viewer':
-    #     role = 'viewer'
-    #     db.create_table_viewer()
-    #     bot.send_message(call.message.chat.id, 'Введіть Ваш нікнейм.')
-    #     bot.register_next_step_handler(call.message, process_nickname_step)
-    # elif call.data == 'organizer':
-    #     role = 'organizer'
-    #     db.create_table_organizer()
-    #     bot.send_message(call.message.chat.id, 'Введіть Ваше ім\'я!')
-    #     bot.register_next_step_handler(call.message, process_name_step)
-    #     return
-    # elif call.data == 'jury':
-    #     role = 'jury'
-    #     db.create_table_jury()
-    #     bot.send_message(call.message.chat.id, 'Введіть Ваше ім\'я!')
-    #     bot.register_next_step_handler(call.message, process_name_step)
-    #     return
-    # elif call.data == 'participant':
-    #     role = 'participant'
-    #     db.create_table_participant()
-    #     bot.send_message(call.message.chat.id, 'Введіть команду, яку Ви представляєте.')
-    #     bot.register_next_step_handler(call.message, process_team_step)
-    #     return
-    # if call.data == 'yes':
-    #     check = True
-    #     bot.send_message(call.message.chat.id, 'Введіть компанію, яку Ви представляєте.')
-    #     bot.register_next_step_handler(call.message, process_company_step)
-    #     return
-    # elif call.data == 'no':
-    #     process_contest_step(call.message)
-    #     return
-    #
-    # if call.data == 'add_contest':
-    #     bot.send_message(call.message.chat.id, 'Введіть назву конкурсу.')
-    #     bot.register_next_step_handler(call.message, process_contest_name_step)
-    # elif call.data == 'join_contest':
-    #     process_contest_step(call.message)
-    #
-    # if call.data == 'start_registration':
-    #     if db.is_organizer(call.message):
-    #         db.start_registration()
-    #         bot.send_message(call.message.chat.id, 'Реєстрація на цей конкурс почалась!')
-    #         start_voting(call.message)
-    #     else:
-    #         bot.send_message(call.message.chat.id, 'Тільки організатори можуть почати реєстрацію.')
-    # elif call.data == 'dont_start_registration':
-    #     bot.send_message(call.message.chat.id, 'Введіть /startregistration , коли захочете почати реєстрацію!')
-    #
-    # if call.data == 'start_voting':
-    #     if db.is_organizer(call.message):
-    #         db.end_registration()
-    #         db.start_voting()
-    #         bot.send_message(call.message.chat.id, 'Голосування почалось!')
-    #         send_messages(call.message)
-    #     else:
-    #         bot.send_message(call.message.chat.id, 'Тільки організатори можуть почати реєстрацію.')
-    # elif call.data == 'dont_start_voting':
-    #     bot.send_message(call.message.chat.id, 'Введіть /startvoting , коли захочете почати голосування!')
-    #
-    # if call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'jury':
-    #     contest_id = int(call.data.split('_')[2])
-    #     add(call.message)
-    #     db.set_id_jury(call.message, contest_id)
-    # elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'participant':
-    #     contest_id = int(call.data.split('_')[2])
-    #     add(call.message)
-    #     db.set_id_participant(call.message, contest_id)
-    # elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'viewer':
-    #     contest_id = int(call.data.split('_')[2])
-    #     add(call.message)
-    #     db.set_id_viewer(call.message, contest_id)
-    # elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'organizer':
-    #     contest_id = int(call.data.split('_')[2])
-    #     add(call.message)
-    #     db.set_id_organizer(call.message, contest_id)
+    if call.data == 'add_contest':
+        bot.send_message(call.message.chat.id, 'Введіть назву конкурсу.')
+        bot.register_next_step_handler(call.message, process_contest_name_step)
+    elif call.data == 'join_contest':
+        process_contest_step(call.message)
+
+    if call.data == 'start_registration':
+        if db.is_organizer(call.message):
+            db.start_registration()
+            bot.send_message(call.message.chat.id, 'Реєстрація на цей конкурс почалась!')
+            add_criteria(call.message)
+        else:
+            bot.send_message(call.message.chat.id, 'Тільки організатори можуть почати реєстрацію.')
+    elif call.data == 'dont_start_registration':
+        bot.send_message(call.message.chat.id, 'Введіть /startregistration , коли захочете почати реєстрацію!')
+
+    if call.data == 'start_voting':
+        if db.is_organizer(call.message):
+            db.end_registration()
+            db.start_voting()
+            bot.send_message(call.message.chat.id, 'Голосування почалось!')
+            send_messages(call.message)
+        else:
+            bot.send_message(call.message.chat.id, 'Тільки організатори можуть почати реєстрацію.')
+    elif call.data == 'dont_start_voting':
+        bot.send_message(call.message.chat.id, 'Введіть /startvoting , коли захочете почати голосування!')
+
+    if call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'jury':
+        contest_id = int(call.data.split('_')[2])
+        add(call.message)
+        db.set_id_jury(call.message, contest_id)
+    elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'participant':
+        contest_id = int(call.data.split('_')[2])
+        add(call.message)
+        db.set_id_participant(call.message, contest_id)
+    elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'viewer':
+        contest_id = int(call.data.split('_')[2])
+        add(call.message)
+        db.set_id_viewer(call.message, contest_id)
+    elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'organizer':
+        contest_id = int(call.data.split('_')[2])
+        add(call.message)
+        db.set_id_organizer(call.message, contest_id)
+
+    if call.data == 'add_criteria':
+        start_criteria(call.message)
+    elif call.data == 'dont_add_criteria':
+        bot.send_message(call.message.chat.id, 'Введіть /criteria , коли захочете додати критерії!')
+    elif call.data == 'process_startup_criteria':
+        project_type = 'startup'
+        current_criteria = default_startup_criteria
+        show_current_criteria(call.message, current_criteria)
+    elif call.data == 'process_design_criteria':
+        project_type = 'design'
+        current_criteria = default_design_criteria
+        show_current_criteria(call.message, current_criteria)
+    elif call.data == 'create_criteria':
+        request_count_of_criteria(call.message)
+    elif call.data == 'change_criteria':
+        request_criteria_number(call.message)
+    elif call.data == 'leave_criteria':
+        db.create_table_criteria()
+        add_criteria_to_db(call.message)
 
 
 bot.polling()
