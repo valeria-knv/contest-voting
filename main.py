@@ -9,7 +9,6 @@ from googleapiclient.errors import HttpError
 
 bot = telebot.TeleBot('6197503153:AAHX9Yz5w1bpDs7v3KlplIye1hg9JVrFQlc')
 
-role = None
 name = None
 lastname = None
 password = None
@@ -21,6 +20,8 @@ contest_name = None
 start_date = None
 end_date = None
 max_organizers = 1
+val = {}
+quantity_check = {}
 
 project_type = None
 custom_criteria_count = None
@@ -60,15 +61,22 @@ class Database:
         self.cursor = self.connection.cursor()
 
     def create_table(self):
-        self.cursor.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY)")
+        self.cursor.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, role TEXT)")
         self.connection.commit()
 
-    def add_user(self, message):
+    def add_user(self, message, user_role):
         try:
-            self.cursor.execute("INSERT INTO users (id) VALUES (?)", (message.chat.id,))
+            self.cursor.execute("INSERT INTO users (id, role) VALUES (?, ?)", (message.chat.id, user_role))
             self.connection.commit()
         except sqlite3.IntegrityError:
             bot.send_message(message.chat.id, 'Ви вже зареєстровані!')
+
+    def get_role_from_users(self, message):
+        self.cursor.execute("SELECT role FROM users WHERE id = ?", (message.chat.id,))
+        result = self.cursor.fetchone()
+        if result:
+            return result[0]
+        return None
 
     def create_table_criteria(self):
         self.cursor.execute("CREATE TABLE IF NOT EXISTS criteria (id INTEGER, name TEXT, contest_id INTEGER, PRIMARY KEY(id, contest_id))")
@@ -82,29 +90,24 @@ class Database:
     def create_table_contest(self):
         self.cursor.execute("CREATE TABLE IF NOT EXISTS contests (id INTEGER PRIMARY KEY, name TEXT NOT NULL, "
                             "start_date TEXT NOT NULL, end_date TEXT NOT NULL, max_organizers INTEGER DEFAULT 1, "
-                            "registration_started INTEGER DEFAULT 0, voting_started INTEGER DEFAULT 0)")
+                            "registration_started INTEGER DEFAULT 0, voting_started INTEGER DEFAULT 0, max_score INTEGER DEFAULT 0,"
+                            " sheet_id TEXT)")
         self.connection.commit()
 
-    def start_registration(self):
-        contest_id_row = self.cursor.execute("SELECT id FROM contests WHERE name = ? AND start_date = ?", (contest_name, start_date)).fetchone()
-        if contest_id_row is not None:
-            contest_id = contest_id_row[0]
-            self.cursor.execute("UPDATE contests SET registration_started = 1 WHERE id = ?", (contest_id,))
-            self.connection.commit()
+    def start_registration(self, message):
+        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        self.cursor.execute("UPDATE contests SET registration_started = 1 WHERE id = ?", (contest_id,))
+        self.connection.commit()
 
-    def end_registration(self):
-        contest_id_row = self.cursor.execute("SELECT id FROM contests WHERE name = ? AND start_date = ?", (contest_name, start_date)).fetchone()
-        if contest_id_row is not None:
-            contest_id = contest_id_row[0]
-            self.cursor.execute("UPDATE contests SET registration_started = 0 WHERE id = ?", (contest_id,))
-            self.connection.commit()
+    def end_registration(self, message):
+        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        self.cursor.execute("UPDATE contests SET registration_started = 0 WHERE id = ?", (contest_id,))
+        self.connection.commit()
 
-    def start_voting(self):
-        contest_id_row = self.cursor.execute("SELECT id FROM contests WHERE name = ? AND start_date = ?", (contest_name, start_date)).fetchone()
-        if contest_id_row is not None:
-            contest_id = contest_id_row[0]
-            self.cursor.execute("UPDATE contests SET voting_started = 1 WHERE id = ?", (contest_id,))
-            self.connection.commit()
+    def start_voting(self, message):
+        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        self.cursor.execute("UPDATE contests SET voting_started = 1 WHERE id = ?", (contest_id,))
+        self.connection.commit()
 
     def add_contest(self):
         self.cursor.execute("INSERT INTO contests (name, start_date, end_date, max_organizers) VALUES (?, ?, ?, ?)",
@@ -153,7 +156,7 @@ class Database:
 
     def create_table_jury(self):
         self.cursor.execute("CREATE TABLE IF NOT EXISTS jury (id INTEGER PRIMARY KEY, name TEXT NOT NULL, "
-                            "lastname TEXT NOT NULL, company TEXT, contest_id INTEGER, password TEXT NOT NULL)")
+                            "lastname TEXT NOT NULL, company TEXT, contest_id INTEGER, password TEXT NOT NULL, all_crit INTEGER DEFAULT 0)")
         self.connection.commit()
 
     def add_user_jury(self, message):
@@ -170,7 +173,7 @@ class Database:
             bot.send_message(message.chat.id, 'Ви вже зареєстровані!')
 
     def create_table_participant(self):
-        self.cursor.execute("CREATE TABLE IF NOT EXISTS participants (id INTEGER PRIMARY KEY, team TEXT NOT NULL, contest_id INTEGER, password TEXT NOT NULL)")
+        self.cursor.execute("CREATE TABLE IF NOT EXISTS participants (id INTEGER PRIMARY KEY, team TEXT NOT NULL, contest_id INTEGER, password TEXT NOT NULL, end INTEGER DEFAULT 0)")
         self.connection.commit()
 
     def add_user_participant(self, message):
@@ -229,12 +232,13 @@ class Database:
         self.connection.commit()
 
     def get_id_jury_from_contest(self, message):
-        contest_id_row = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()
-        if contest_id_row is not None:
-            contest_id = contest_id_row[0]
-            return self.cursor.execute("SELECT id FROM jury WHERE contest_id = ?", (contest_id,)).fetchall()
-        else:
-            return 0
+        user_role = self.get_role_from_users(message)
+        contest_id = 0
+        if user_role == 'organizer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT id FROM jury WHERE contest_id = ?", (contest_id,)).fetchall()
 
     def get_id_participants_from_contest(self, message):
         contest_id_row = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()
@@ -245,19 +249,48 @@ class Database:
             return 0
 
     def get_number_of_participants(self, message):
-        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        user_role = self.get_role_from_users(message)
+        contest_id = 0
+        if user_role == 'organizer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (message.chat.id,)).fetchone()[0]
         return self.cursor.execute("SELECT COUNT(id) FROM participants WHERE contest_id = ?", (contest_id,)).fetchone()[0]
 
     def get_number_of_criteria(self, message):
-        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        user_role = self.get_role_from_users(message)
+        contest_id = 0
+        if user_role == 'organizer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (message.chat.id,)).fetchone()[0]
         return self.cursor.execute("SELECT COUNT(id) FROM criteria WHERE contest_id = ?", (contest_id,)).fetchone()[0]
 
     def get_number_of_jury(self, message):
-        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        user_role = self.get_role_from_users(message)
+        contest_id = 0
+        if user_role == 'organizer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (message.chat.id,)).fetchone()[0]
         return self.cursor.execute("SELECT COUNT(id) FROM jury WHERE contest_id = ?", (contest_id,)).fetchone()[0]
 
     def get_list_of_participants(self, message):
-        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        user_role = self.get_role_from_users(message)
+        contest_id = 0
+        if user_role == 'organizer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT team FROM participants WHERE contest_id = ? AND end = 0", (contest_id,)).fetchall()
+
+    def get_list_of_participants_all(self, message):
+        user_role = self.get_role_from_users(message)
+        contest_id = 0
+        if user_role == 'organizer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (message.chat.id,)).fetchone()[0]
         return self.cursor.execute("SELECT team FROM participants WHERE contest_id = ?", (contest_id,)).fetchall()
 
     def get_list_of_criteria(self, message):
@@ -268,12 +301,151 @@ class Database:
         contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
         return self.cursor.execute("SELECT lastname FROM jury WHERE contest_id = ?", (contest_id,)).fetchall()
 
+    def get_ids_of_participants(self, message):
+        user_role = self.get_role_from_users(message)
+        contest_id = 0
+        if user_role == 'organizer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT id FROM participants WHERE contest_id = ? AND end = 0", (contest_id,)).fetchall()
+
+    def get_name_participants(self, part_id):
+        return self.cursor.execute("SELECT team FROM participants WHERE id = ?", (part_id,)).fetchone()[0]
+
+    def get_start_date(self, message):
+        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT start_date FROM contests WHERE id = ?", (contest_id,)).fetchone()[0]
+
+    def get_end_date(self, message):
+        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT end_date FROM contests WHERE id = ?", (contest_id,)).fetchone()[0]
+
+    def set_max_score(self, message, max_sc):
+        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        self.cursor.execute("UPDATE contests SET max_score = ? WHERE id = ?", (max_sc, contest_id))
+        self.connection.commit()
+
+    def get_ids_names_criteria(self, message):
+        user_role = self.get_role_from_users(message)
+        contest_id = 0
+        if user_role == 'organizer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        criteria_rows = self.cursor.execute("SELECT id, name FROM criteria WHERE contest_id = ?", (contest_id,)).fetchall()
+        criteria = [(row[0], row[1]) for row in criteria_rows]
+        return criteria
+
+    def get_max_score(self, message):
+        user_role = self.get_role_from_users(message)
+        contest_id = 0
+        if user_role == 'organizer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT max_score FROM contests WHERE id = ?", (contest_id,)).fetchone()[0]
+
+    def set_sheet_id(self, message, sheet_id):
+        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        self.cursor.execute("UPDATE contests SET sheet_id = ? WHERE id = ?", (sheet_id, contest_id))
+        self.connection.commit()
+
+    def get_sheet_id(self, message):
+        user_role = self.get_role_from_users(message)
+        contest_id = 0
+        if user_role == 'organizer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT sheet_id FROM contests WHERE id = ?", (contest_id,)).fetchone()[0]
+
+    def get_name_jury(self, id_jury):
+        return self.cursor.execute("SELECT lastname FROM jury WHERE id = ?", (id_jury,)).fetchone()[0]
+
+    def get_name_criteria(self, message, numb):
+        user_role = self.get_role_from_users(message)
+        contest_id = 0
+        if user_role == 'organizer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT name FROM criteria WHERE contest_id = ? AND id = ?", (contest_id, numb)).fetchone()[0]
+
+    def set_end_for_participants(self, part_id):
+        self.cursor.execute("UPDATE participants SET end = 1 WHERE id = ?", (part_id,))
+        self.connection.commit()
+
+    def get_id_organizer(self, message):
+        user_role = self.get_role_from_users(message)
+        contest_id = 0
+        if user_role == 'organizer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT id FROM organizers WHERE contest_id = ?", (contest_id,)).fetchone()[0]
+
+    def get_id_participants_from_name(self, message, part_name):
+        user_role = self.get_role_from_users(message)
+        contest_id = 0
+        if user_role == 'organizer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT id FROM participants WHERE contest_id = ? AND team = ?", (contest_id, part_name)).fetchone()[0]
+
+    def get_role_from_users_for_score(self, id_jury):
+        self.cursor.execute("SELECT role FROM users WHERE id = ?", (id_jury,))
+        result = self.cursor.fetchone()
+        if result:
+            return result[0]
+        return None
+
+    def get_all_crit(self, id_jury):
+        user_role = self.get_role_from_users_for_score(id_jury)
+        contest_id = 0
+        if user_role == 'organizer':
+            return
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (id_jury,)).fetchone()[0]
+        return self.cursor.execute("SELECT all_crit FROM jury WHERE contest_id = ? AND id = ?", (contest_id, id_jury)).fetchone()[0]
+
+    def set_all_crit(self, message, numb, id_jury):
+        user_role = self.get_role_from_users(message)
+        contest_id = 0
+        if user_role == 'organizer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        self.cursor.execute("UPDATE jury SET all_crit = ? WHERE contest_id = ? AND id = ?", (numb, contest_id, id_jury))
+        self.connection.commit()
+
+    def set_null_for_all_crit(self, id_jury):
+        user_role = self.get_role_from_users_for_score(id_jury)
+        contest_id = 0
+        if user_role == 'organizer':
+            return
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (id_jury,)).fetchone()[0]
+        self.cursor.execute("UPDATE jury SET all_crit = 0 WHERE contest_id = ? AND id = ?", (contest_id, id_jury))
+        self.connection.commit()
+
 
 db = Database('test1.db')
 
 
+def get_username(message):
+    if message.from_user.username:
+        return message.from_user.username.lower().endswith('bot')
+    else:
+        return None
+
+
 @bot.message_handler(commands=['start', 'help'])
 def handle_start_help(message):
+    if get_username(message) or get_username(message) is None:
+        bot.send_message(message.chat.id, 'Це бот, Ви не зможете продовжити!')
+        return
     db.create_table()
     if db.user_exists(message):
         bot.send_message(message.chat.id, 'Ви вже зареєстровані!')
@@ -287,7 +459,6 @@ def handle_register(message):
     if db.user_exists(message):
         bot.send_message(message.chat.id, 'Ви вже зареєстровані!')
     else:
-        db.add_user(message)
         markup = telebot.types.InlineKeyboardMarkup()
         user_button = telebot.types.InlineKeyboardButton('Глядач', callback_data='viewer')
         organizer_button = telebot.types.InlineKeyboardButton('Організатор', callback_data='organizer')
@@ -315,6 +486,9 @@ def handle_start_voting(message):
 def process_name_step(message):
     global name
     name = message.text
+    # role = db.get_role_from_users(message)
+    # val['role'] = role
+    # val['name'] = name
     bot.reply_to(message, 'Введіть Ваше прізвище')
     bot.register_next_step_handler(message, process_lastname_step)
 
@@ -361,15 +535,14 @@ def process_contest_step(message):
 
 def process_password_step(message):
     global password
-    global role
     password = message.text
-    if role == 'jury':
+    if db.get_role_from_users(message) == 'jury':
         markup = telebot.types.InlineKeyboardMarkup()
         yes_button = telebot.types.InlineKeyboardButton('Так', callback_data='yes')
         no_button = telebot.types.InlineKeyboardButton('Ні', callback_data='no')
         markup.add(yes_button, no_button)
         bot.send_message(message.chat.id, 'Ви представляєте якусь компанію?', reply_markup=markup)
-    elif role == 'organizer':
+    elif db.get_role_from_users(message) == 'organizer':
         organizer_add_contest(message)
     else:
         process_contest_step(message)
@@ -384,14 +557,14 @@ def organizer_add_contest(message):
 
 
 def add(message):
-    global role
-    if role == 'viewer':
+    user_role = db.get_role_from_users(message)
+    if user_role == 'viewer':
         db.add_user_viewer(message)
-    elif role == 'organizer':
+    elif user_role == 'organizer':
         db.add_user_organizer(message)
-    elif role == 'jury':
+    elif user_role == 'jury':
         db.add_user_jury(message)
-    elif role == 'participant':
+    elif user_role == 'participant':
         db.add_user_participant(message)
 
 
@@ -402,18 +575,34 @@ def process_contest_name_step(message):
     bot.register_next_step_handler(message, process_start_date_step)
 
 
+def is_valid_date_format(date_str):
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+        return True
+    except ValueError:
+        return False
+
+
 def process_start_date_step(message):
     global start_date
     start_date = message.text
-    bot.reply_to(message, 'Введіть дату закінчення конкурсу у форматі "рік-місяць-день".')
-    bot.register_next_step_handler(message, process_end_date_step)
+    if is_valid_date_format(start_date):
+        bot.reply_to(message, 'Введіть дату закінчення конкурсу у форматі "рік-місяць-день".')
+        bot.register_next_step_handler(message, process_end_date_step)
+    else:
+        bot.reply_to(message, 'Невірний формат дати. Будь ласка, введіть дату у форматі "РРРР-ММ-ДД" (наприклад, 2023-06-26):')
+        bot.register_next_step_handler(message, process_start_date_step)
 
 
 def process_end_date_step(message):
     global end_date
     end_date = message.text
-    bot.reply_to(message, 'Введіть кількість організаторів, які можуть приєднатись до конкурсу:')
-    bot.register_next_step_handler(message, process_max_organizers_step)
+    if is_valid_date_format(start_date):
+        bot.reply_to(message, 'Введіть кількість організаторів, які можуть приєднатись до конкурсу:')
+        bot.register_next_step_handler(message, process_max_organizers_step)
+    else:
+        bot.reply_to(message, 'Невірний формат дати. Будь ласка, введіть дату у форматі "РРРР-ММ-ДД" (наприклад, 2023-06-26):')
+        bot.register_next_step_handler(message, process_end_date_step)
 
 
 def process_max_organizers_step(message):
@@ -439,6 +628,9 @@ def add_contest(message):
 def check_date(message):
     global start_date
     global end_date
+
+    start_date = db.get_start_date(message)
+    end_date = db.get_end_date(message)
 
     start_date_obj = datetime.strptime(start_date, "%Y-%m-%d").date()
     end_date_obj = datetime.strptime(end_date, "%Y-%m-%d").date()
@@ -590,13 +782,142 @@ def start_voting(message):
 
 
 def send_messages(message):
-    # ids_jury = db.get_id_jury_from_contest(message)
-    # ids_participants = db.get_id_participants_from_contest(message)
-    # for id_jury in ids_jury:
-    #     bot.send_message(int(id_jury[0]), 'Голосування почалось!')
-    # for id_part in ids_participants:
-    #     bot.send_message(int(id_part[0]), 'Голосування почалось!')
+    ids_jury = db.get_id_jury_from_contest(message)
+    ids_participants = db.get_id_participants_from_contest(message)
+    for id_jury in ids_jury:
+        bot.send_message(int(id_jury[0]), 'Голосування почалось!')
+    for id_part in ids_participants:
+        bot.send_message(int(id_part[0]), 'Голосування почалось!')
     create('contest voting', message)
+
+
+def send_messages_jury_about_team(message, part_id, part_name):
+    ids_jury = db.get_id_jury_from_contest(message)
+    for id_jury in ids_jury:
+        bot.send_message(int(id_jury[0]), f'Зараз виступає команда {part_name}!\nПоставте свої бали, будь ласка.')
+    criteria_scores(message, part_id, part_name)
+
+
+def criteria_scores(message, part_id, part_name):
+    global val
+    global quantity_check
+    criteria = db.get_ids_names_criteria(message)
+    ids_jury = db.get_id_jury_from_contest(message)
+    max_sc = db.get_max_score(message)
+    for id_jury in ids_jury:
+        val[f'{int(id_jury[0])}'] = 0
+        quantity_check[f'{int(id_jury[0])}'] = True
+    send_next_criterion(message, criteria, ids_jury, part_id, max_sc, part_name)
+
+
+def send_next_criterion(message, criteria, ids_jury, part_id, max_sc, part_name):
+    global val
+    global quantity_check
+
+    check_again = [0] * len(ids_jury)
+    i = 0
+    for id_jury in ids_jury:
+        if db.get_all_crit(int(id_jury[0])) >= len(criteria):
+            check_again[i] = 1
+        else:
+            check_again[i] = 0
+        i += 1
+    if all(item == 1 for item in check_again):
+        db.set_end_for_participants(part_id)
+        team_selection(message)
+        return
+
+    for id_jury in ids_jury:
+        current_criterion_index = db.get_all_crit(int(id_jury[0]))
+        if current_criterion_index == val[f'{int(id_jury[0])}'] and current_criterion_index < len(criteria) and quantity_check[f'{int(id_jury[0])}']:
+            crit = criteria[current_criterion_index]
+            bot.send_message(int(id_jury[0]), f'{int(crit[0])}. {crit[1]}')
+            quantity_check[f'{int(id_jury[0])}'] = False
+
+            markup = telebot.types.InlineKeyboardMarkup()
+            for i in range(1, max_sc + 1):
+                score_button = telebot.types.InlineKeyboardButton(
+                    str(i),
+                    callback_data=f'_{str(i)}_{str(id_jury[0])}_{part_name}_{str(crit[0])}'
+                )
+                markup.add(score_button)
+            bot.send_message(int(id_jury[0]), "Оберіть бал:", reply_markup=markup)
+
+
+def add_score_to_sheet(message, id_jury, sc, part_name, crit):
+    start_col = 1
+    start_row = 1
+    number_of_jury = db.get_number_of_jury(message)
+    number_of_criteria = db.get_number_of_criteria(message)
+    number_of_participants = db.get_number_of_participants(message)
+    spreadsheet_id = db.get_sheet_id(message)
+    name_jury = db.get_name_jury(id_jury)
+    service = build('sheets', 'v4', credentials=service_account.Credentials.from_service_account_file(
+        CREDENTIALS_FILE,
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ],
+    ))
+    range_names = [f"B1:B{(2 + number_of_jury) * number_of_participants}"]
+    result = service.spreadsheets().values().batchGet(
+        spreadsheetId=spreadsheet_id, ranges=range_names).execute()
+    ranges = result.get('valueRanges', [])
+    for range_data in ranges:
+        values = range_data.get('values', [])
+        for row in range(len(values)):
+            for col in range(len(values[row])):
+                if values[row][col] == part_name:
+                    start_row = row + 1
+
+    temp = int(start_row + 2)
+    range_names = [f"A{temp}:A{temp - 1 + number_of_jury}"]
+    result = service.spreadsheets().values().batchGet(
+        spreadsheetId=spreadsheet_id, ranges=range_names).execute()
+    ranges = result.get('valueRanges', [])
+    for range_data in ranges:
+        values = range_data.get('values', [])
+        for row in range(len(values)):
+            for col in range(len(values[row])):
+                if values[row][col] == name_jury:
+                    temp += int(row)
+
+    range_names = [f"B2:{chr(1 + number_of_criteria + 64)}2"]
+    result = service.spreadsheets().values().batchGet(
+        spreadsheetId=spreadsheet_id, ranges=range_names).execute()
+    ranges = result.get('valueRanges', [])
+    for range_data in ranges:
+        values = range_data.get('values', [])
+        for row in range(len(values)):
+            for col in range(len(values[row])):
+                if values[row][col] == crit:
+                    start_col = col + 2
+
+    start_row = int(temp)
+    data = [
+        {
+            'range': f"{chr(start_col + 64)}{start_row}",
+            'values': [[sc]]
+        }
+    ]
+    body = {
+        'valueInputOption': 'USER_ENTERED',
+        'data': data
+    }
+    service.spreadsheets().values().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
+
+
+def max_score(message):
+    try:
+        max_sc = int(message.text)
+        if max_sc <= 0:
+            raise ValueError
+        else:
+            db.set_max_score(message, max_sc)
+            team_selection(message)
+    except ValueError:
+        bot.reply_to(message, 'Вказана кількість не валідна, спробуйте ще раз:')
+        bot.register_next_step_handler(message, max_score)
 
 
 def create(title, message):
@@ -617,6 +938,7 @@ def create(title, message):
         }
         spreadsheet = service.spreadsheets().create(body=spreadsheet).execute()
         spreadsheet_id = spreadsheet.get("spreadsheetId")
+        db.set_sheet_id(message, spreadsheet_id)
 
         drive = build("drive", "v3", credentials=creds)
         permission = {
@@ -626,14 +948,16 @@ def create(title, message):
         drive.permissions().create(fileId=spreadsheet_id, body=permission).execute()
 
         link = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit#gid=0"
-        add_value_to_sheet(message, link, spreadsheet_id, service)
+        add_value_to_sheet(message, spreadsheet_id, service)
         bot.send_message(message.chat.id, f"Посилання на Google таблицю: {link}")
+        bot.send_message(message.chat.id, "Напишіть, який максимальний балл на цьому конкурсі!")
+        bot.register_next_step_handler(message, max_score)
     except HttpError as error:
         print(f"An error occurred: {error}")
         return error
 
 
-def add_value_to_sheet(message, link, spreadsheet_id, service):
+def add_value_to_sheet(message, spreadsheet_id, service):
     number_of_participants = db.get_number_of_participants(message)
     number_of_criteria = db.get_number_of_criteria(message)
     number_of_jury = db.get_number_of_jury(message)
@@ -641,7 +965,6 @@ def add_value_to_sheet(message, link, spreadsheet_id, service):
     list_of_participants = db.get_list_of_participants(message)
     list_of_criteria = db.get_list_of_criteria(message)
     list_of_jury = db.get_list_of_jury(message)
-    data = []
 
     temp = 1
     start_col = 2
@@ -699,9 +1022,33 @@ def add_value_to_sheet(message, link, spreadsheet_id, service):
     service.spreadsheets().values().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
 
 
+def team_selection(message):
+    ids_jury = db.get_id_jury_from_contest(message)
+    for id_jury in ids_jury:
+        db.set_null_for_all_crit(int(id_jury[0]))
+
+    list_of_participants_all = db.get_list_of_participants_all(message)
+    list_of_participants = db.get_list_of_participants(message)
+    ids_of_participants = db.get_ids_of_participants(message)
+    id_org = db.get_id_organizer(message)
+    if len(list_of_participants) > 0:
+        markup = telebot.types.InlineKeyboardMarkup()
+        for i in range(len(list_of_participants)):
+            contest_button = telebot.types.InlineKeyboardButton(list_of_participants[i][0], callback_data=f'team_{ids_of_participants[i][0]}')
+            markup.add(contest_button)
+        bot.send_message(id_org, 'Оберіть команду, яка зараз буде виступати:', reply_markup=markup)
+    else:
+        bot.send_message(id_org, 'Учасників немає!')
+        if len(list_of_participants_all) > 0:
+            score_rating(id_org)
+
+
+def score_rating(message):
+    bot.send_message(message.chat.id, 'Тут буде рейтинг')
+
+
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback_query(call):
-    global role
     global check
     global name
     global project_type
@@ -709,24 +1056,24 @@ def handle_callback_query(call):
     global default_startup_criteria
     global default_design_criteria
     if call.data == 'viewer':
-        role = 'viewer'
+        db.add_user(call.message, "viewer")
         db.create_table_viewer()
         bot.send_message(call.message.chat.id, 'Введіть Ваш нікнейм.')
         bot.register_next_step_handler(call.message, process_nickname_step)
     elif call.data == 'organizer':
-        role = 'organizer'
+        db.add_user(call.message, "organizer")
         db.create_table_organizer()
         bot.send_message(call.message.chat.id, 'Введіть Ваше ім\'я!')
         bot.register_next_step_handler(call.message, process_name_step)
         return
     elif call.data == 'jury':
-        role = 'jury'
+        db.add_user(call.message, "jury")
         db.create_table_jury()
         bot.send_message(call.message.chat.id, 'Введіть Ваше ім\'я!')
         bot.register_next_step_handler(call.message, process_name_step)
         return
     elif call.data == 'participant':
-        role = 'participant'
+        db.add_user(call.message, "participant")
         db.create_table_participant()
         bot.send_message(call.message.chat.id, 'Введіть команду, яку Ви представляєте.')
         bot.register_next_step_handler(call.message, process_team_step)
@@ -748,7 +1095,7 @@ def handle_callback_query(call):
 
     if call.data == 'start_registration':
         if db.is_organizer(call.message):
-            db.start_registration()
+            db.start_registration(call.message)
             bot.send_message(call.message.chat.id, 'Реєстрація на цей конкурс почалась!')
             add_criteria(call.message)
         else:
@@ -758,8 +1105,8 @@ def handle_callback_query(call):
 
     if call.data == 'start_voting':
         if db.is_organizer(call.message):
-            db.end_registration()
-            db.start_voting()
+            db.end_registration(call.message)
+            db.start_voting(call.message)
             bot.send_message(call.message.chat.id, 'Голосування почалось!')
             send_messages(call.message)
         else:
@@ -767,19 +1114,19 @@ def handle_callback_query(call):
     elif call.data == 'dont_start_voting':
         bot.send_message(call.message.chat.id, 'Введіть /startvoting , коли захочете почати голосування!')
 
-    if call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'jury':
+    if call.data.startswith('join_contest_') and call.data[-1].isdigit() and db.get_role_from_users(call.message) == 'jury':
         contest_id = int(call.data.split('_')[2])
         add(call.message)
         db.set_id_jury(call.message, contest_id)
-    elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'participant':
+    elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and db.get_role_from_users(call.message) == 'participant':
         contest_id = int(call.data.split('_')[2])
         add(call.message)
         db.set_id_participant(call.message, contest_id)
-    elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'viewer':
+    elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and db.get_role_from_users(call.message) == 'viewer':
         contest_id = int(call.data.split('_')[2])
         add(call.message)
         db.set_id_viewer(call.message, contest_id)
-    elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and role == 'organizer':
+    elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and db.get_role_from_users(call.message) == 'organizer':
         contest_id = int(call.data.split('_')[2])
         add(call.message)
         db.set_id_organizer(call.message, contest_id)
@@ -803,6 +1150,31 @@ def handle_callback_query(call):
     elif call.data == 'leave_criteria':
         db.create_table_criteria()
         add_criteria_to_db(call.message)
+
+    if call.data.startswith('team_'):
+        data = call.data.split('_')
+        part_id = int(data[1])
+        part_name = db.get_name_participants(part_id)
+        send_messages_jury_about_team(call.message, part_id, part_name)
+
+    if call.data.startswith('_'):
+        data = call.data.split('_')
+        id_jury = int(data[2])
+        sc = int(data[1])
+        part_name = str(data[3])
+        part_id = db.get_id_participants_from_name(call.message, part_name)
+        crit = db.get_name_criteria(call.message, data[4])
+        add_score_to_sheet(call.message, id_jury, sc, part_name, crit)
+
+        criteria = db.get_ids_names_criteria(call.message)
+        ids_jury = db.get_id_jury_from_contest(call.message)
+
+        current_criterion_index = db.get_all_crit(id_jury) + 1
+        val[f'{id_jury}'] = current_criterion_index
+        db.set_all_crit(call.message, current_criterion_index, id_jury)
+        quantity_check[f'{id_jury}'] = True
+
+        send_next_criterion(call.message, criteria, ids_jury, part_id, db.get_max_score(call.message), part_name)
 
 
 bot.polling()
