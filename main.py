@@ -6,12 +6,16 @@ from datetime import date, datetime
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+import gspread
 
 bot = telebot.TeleBot('6197503153:AAHX9Yz5w1bpDs7v3KlplIye1hg9JVrFQlc')
 
 check = False
 val = {}
 quantity_check = {}
+
+organizer_table_title = None
+team_scores = []
 
 project_type = None
 custom_criteria_count = None
@@ -46,6 +50,15 @@ current_part_name = None
 
 CREDENTIALS_FILE = 'credentials2.json'
 
+sa = gspread.service_account(filename=CREDENTIALS_FILE)
+ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ'
+
+
+class TeamScore:
+    def __init__(self, name, score):
+        self.name = name
+        self.score = score
+
 
 class Database:
     def __init__(self, db_name):
@@ -70,6 +83,12 @@ class Database:
             return result[0]
         return None
 
+    def get_role_from_users_id(self, id_user):
+        result = self.cursor.execute("SELECT role FROM users WHERE id = ?", (id_user,)).fetchone()
+        if result:
+            return result[0]
+        return None
+
     def create_table_criteria(self):
         self.cursor.execute("CREATE TABLE IF NOT EXISTS criteria (id INTEGER, name TEXT, contest_id INTEGER, PRIMARY KEY(id, contest_id))")
         self.connection.commit()
@@ -81,7 +100,7 @@ class Database:
 
     def create_table_contest(self):
         self.cursor.execute("CREATE TABLE IF NOT EXISTS contests (id INTEGER PRIMARY KEY, name TEXT, "
-                            "start_date TEXT, end_date TEXT, max_organizers INTEGER DEFAULT 1, "
+                            "start_date TEXT, end_date TEXT, "
                             "registration_started INTEGER DEFAULT 0, voting_started INTEGER DEFAULT 0, max_score INTEGER DEFAULT 0,"
                             " sheet_id TEXT)")
         self.connection.commit()
@@ -101,11 +120,6 @@ class Database:
         self.cursor.execute("UPDATE contests SET voting_started = ? WHERE id = ?", (type_of_voting, contest_id))
         self.connection.commit()
 
-    def add_max_organizers(self, message, max_organizers):
-        contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
-        self.cursor.execute("UPDATE contests SET max_organizers = ? WHERE id = ?", (max_organizers, contest_id))
-        self.connection.commit()
-
     def get_active_contests(self):
         self.cursor.execute("SELECT id, name, start_date FROM contests WHERE start_date < date('now') AND end_date > date('now') AND registration_started = 1")
         return self.cursor.fetchall()
@@ -116,9 +130,6 @@ class Database:
 
     def get_number_organizer_of_contest(self, contest_id):
         return self.cursor.execute("SELECT id FROM organizers WHERE contest_id = ?", (contest_id,)).fetchall()
-
-    def get_max_organizers(self, contest_id):
-        return self.cursor.execute("SELECT max_organizers FROM contests WHERE id = ?", (contest_id,)).fetchone()[0]
 
     def user_exists(self, message):
         try:
@@ -287,6 +298,10 @@ class Database:
         self.cursor.execute("DELETE FROM users WHERE id = ?", (message.chat.id,))
         self.connection.commit()
 
+    def delete_from_users_id(self, user_id):
+        self.cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        self.connection.commit()
+
     def delete_contest(self, contest_id):
         self.cursor.execute("DELETE FROM contests WHERE id = ?", (contest_id,))
         self.connection.commit()
@@ -305,6 +320,18 @@ class Database:
             self.cursor.execute("DELETE FROM participants WHERE id = ?", (message.chat.id,))
         elif user_role == 'viewer':
             self.cursor.execute("DELETE FROM viewer WHERE id = ?", (message.chat.id,))
+        self.connection.commit()
+
+    def delete_from_tables_id(self, user_id):
+        user_role = self.get_role_from_users_id(user_id)
+        if user_role == 'organizer':
+            self.cursor.execute("DELETE FROM organizers WHERE id = ?", (user_id,))
+        elif user_role == 'jury':
+            self.cursor.execute("DELETE FROM jury WHERE id = ?", (user_id,))
+        elif user_role == 'participant':
+            self.cursor.execute("DELETE FROM participants WHERE id = ?", (user_id,))
+        elif user_role == 'viewer':
+            self.cursor.execute("DELETE FROM viewer WHERE id = ?", (user_id,))
         self.connection.commit()
 
     def get_id_jury_from_contest(self, message):
@@ -415,6 +442,32 @@ class Database:
         elif user_role == 'viewer':
             contest_id = self.cursor.execute("SELECT contest_id FROM viewer WHERE id = ?", (message.chat.id,)).fetchone()[0]
         return self.cursor.execute("SELECT id FROM participants WHERE contest_id = ? AND end = 0", (contest_id,)).fetchall()
+
+    def get_ids_of_participants_end(self, message):
+        user_role = self.get_role_from_users(message)
+        contest_id = 0
+        if user_role == 'organizer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'participant':
+            contest_id = self.cursor.execute("SELECT contest_id FROM participants WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'viewer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM viewer WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT id FROM participants WHERE contest_id = ? AND end = 1", (contest_id,)).fetchall()
+
+    def get_ids_of_participants_all(self, message):
+        user_role = self.get_role_from_users(message)
+        contest_id = 0
+        if user_role == 'organizer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'jury':
+            contest_id = self.cursor.execute("SELECT contest_id FROM jury WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'participant':
+            contest_id = self.cursor.execute("SELECT contest_id FROM participants WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        elif user_role == 'viewer':
+            contest_id = self.cursor.execute("SELECT contest_id FROM viewer WHERE id = ?", (message.chat.id,)).fetchone()[0]
+        return self.cursor.execute("SELECT id FROM participants WHERE contest_id = ?", (contest_id,)).fetchall()
 
     def get_ids_of_viewer(self, message):
         user_role = self.get_role_from_users(message)
@@ -640,7 +693,7 @@ class Database:
 
     def get_contest(self, message):
         contest_id = self.cursor.execute("SELECT contest_id FROM organizers WHERE id = ?", (message.chat.id,))
-        result = self.cursor.execute("SELECT id, name FROM contests WHERE id = ?", (contest_id, ))
+        result = self.cursor.execute("SELECT id, name FROM contests WHERE id = ?", (contest_id,))
         if result.fetchall() is not None:
             return result.fetchall()
         return None
@@ -657,11 +710,17 @@ def get_username(message):
 
 
 @bot.message_handler(commands=['start'])
-def handle_start(message):
+def handle_start_help(message):
     if get_username(message) or get_username(message) is None:
         bot.send_message(message.chat.id, 'Це бот, Ви не зможете продовжити!')
         return
     db.create_table()
+    db.create_table_organizer()
+    db.create_table_jury()
+    db.create_table_participant()
+    db.create_table_viewer()
+    db.create_table_contest()
+    db.create_table_criteria()
     if db.user_exists(message):
         bot.send_message(message.chat.id, 'Ви вже зареєстровані!')
     else:
@@ -678,6 +737,11 @@ def handle_register(message):
         bot.send_message(message.chat.id, 'Ви вже зареєстровані!')
     else:
         bot.send_message(message.chat.id, 'Якщо вам знадобиться допомога, введіть /help після реєстрації')
+        bot.send_message(message.chat.id, 'Організатор створює голосування та керує їм. Якщо у вас декілька організаторів, оберіть того, хто буде керувати конкурсом у боті.\n\n'
+                                          'Жюрі може приєднатись тільки під час періоду "реєстрація". Організатору потрібно повідомити жюрі, коли почнеться та звкінчеться цей період.\n\n'
+                                          'Команда (участник) також приєднується тільки під час періоду "реєстрація". Організатору потрібно повідомити учасників, коли почнеться та звкінчеться цей період. '
+                                          'Якщо у вас команда, то приєднується тільки ЛІДЕР команди.\n\n'
+                                          'Глядач приєднується тільки після того, як почнеться вже голосування!')
         markup = telebot.types.InlineKeyboardMarkup()
         user_button = telebot.types.InlineKeyboardButton('Глядач', callback_data='viewer')
         organizer_button = telebot.types.InlineKeyboardButton('Організатор', callback_data='organizer')
@@ -724,8 +788,7 @@ def handle_help(message):
                 "/start - Почати роботу бота",
                 "/register - Зареєструватись",
                 "/help - Отримати список команд",
-                " - Змінити свої бали",  # ----------------------------------------------------------------------------------------------------- Lena
-                " - Переглянути свої бали",  # ----------------------------------------------------------------------------------------------------- Lena
+                "/changescore - Змінити бал вже оціненій команді (учаснику) чи просто продивитись бали",
                 "/delete - Видалення акаунту"
             ]
         elif user_role == 'participant':
@@ -756,6 +819,17 @@ def handle_start_voting(message):
     if db.user_exists(message):
         if db.is_organizer(message):
             start_voting(message)
+        else:
+            bot.send_message(message.chat.id, "Ви не організатор!")
+    else:
+        bot.send_message(message.chat.id, "Ви не зареєстровані!")
+
+
+@bot.message_handler(commands=['addcontest'])
+def handle_add_contest(message):
+    if db.user_exists(message):
+        if db.is_organizer(message):
+            organizer_add_contest(message)
         else:
             bot.send_message(message.chat.id, "Ви не організатор!")
     else:
@@ -813,9 +887,21 @@ def handle_delete_contest(message):
         bot.send_message(message.chat.id, "Ви не зареєстровані!")
 
 
+@bot.message_handler(commands=['changescore'])
+def handle_start_voting_for_jury(message):
+    if db.user_exists(message):
+        if db.is_jury(message):
+            change_points(message)
+        else:
+            bot.send_message(message.chat.id, "Ви не жюрі!")
+    else:
+        bot.send_message(message.chat.id, "Ви не зареєстровані!")
+
+
 @bot.message_handler(commands=['delete'])
 def handle_delete(message):
     if db.user_exists(message):
+        db.delete_from_tables(message)
         db.delete_from_users(message)
     else:
         bot.send_message(message.chat.id, "Ви не зареєстровані!")
@@ -899,9 +985,9 @@ def process_password_step(message):
 def organizer_add_contest(message):
     markup = telebot.types.InlineKeyboardMarkup()
     add_contest_button = telebot.types.InlineKeyboardButton('Додати конкурс', callback_data='add_contest')
-    join_contest_button = telebot.types.InlineKeyboardButton('Приєднатись', callback_data='join_contest')
+    join_contest_button = telebot.types.InlineKeyboardButton('Не додавати', callback_data='no_contest')
     markup.add(add_contest_button, join_contest_button)
-    bot.send_message(message.chat.id, 'Ви зареєстровані як організатор. Додайте конкурс чи приєднайтесь до існуючого конкурсу:', reply_markup=markup)
+    bot.send_message(message.chat.id, 'Ви зареєстровані як організатор. Додайте конкурс:', reply_markup=markup)
 
 
 def process_contest_name_step(message):
@@ -909,7 +995,7 @@ def process_contest_name_step(message):
     contest_name = message.text
     contest_id = db.add_contest_name(contest_name)
     db.set_id_organizer(message, contest_id)
-    bot.reply_to(message, 'Введіть дату початку конкурсу у форматі "рік-місяць-день".')
+    bot.reply_to(message, 'Введіть дату початку конкурсу у форматі "рік-місяць-день".\n\nУ період, який Ви зараз визначите, повинно входити період реєстрації та період голосування!')
     bot.register_next_step_handler(message, process_start_date_step)
 
 
@@ -935,25 +1021,14 @@ def process_start_date_step(message):
 def process_end_date_step(message):
     contest_end_date = message.text
     if is_valid_date_format(contest_end_date):
-        bot.reply_to(message, 'Введіть кількість організаторів, які можуть приєднатись до конкурсу:')
         db.add_end_date(message, contest_end_date)
-        bot.register_next_step_handler(message, process_max_organizers_step)
+        add_contest(message)
     else:
         bot.reply_to(message, 'Невірний формат дати. Будь ласка, введіть дату у форматі "РРРР-ММ-ДД" (наприклад, 2023-06-26):')
         bot.register_next_step_handler(message, process_end_date_step)
 
 
-def process_max_organizers_step(message):
-    try:
-        max_organizers = int(message.text)
-        add_contest(message, max_organizers)
-    except ValueError:
-        bot.send_message(message.chat.id, 'Невірне значення кількості організаторів!')
-        process_max_organizers_step(message)
-
-
-def add_contest(message, max_organizers):
-    db.add_max_organizers(message, max_organizers)
+def add_contest(message):
     bot.send_message(message.chat.id, 'Конкурс додано!')
     start_registration(message)
 
@@ -980,13 +1055,6 @@ def start_registration(message):
     dont_start_registration_button = telebot.types.InlineKeyboardButton('Пізніше', callback_data='dont_start_registration')
     markup.add(start_registration_button, dont_start_registration_button)
     bot.send_message(message.chat.id, 'Чи хочете Ви почати реєстрацію для жюрі та учасників?', reply_markup=markup)
-
-
-def opportunity_join(contest_id):
-    number = db.get_max_organizers(contest_id)
-    if number <= len(db.get_number_organizer_of_contest(contest_id)):
-        return False
-    return True
 
 
 def add_criteria(message):
@@ -1026,10 +1094,38 @@ def criteria_as_string(criteria):
 def show_current_criteria(message, criteria):
     markup = telebot.types.InlineKeyboardMarkup()
     leave_button = telebot.types.InlineKeyboardButton('Залишити поточні', callback_data='leave_criteria')
-    change_button = telebot.types.InlineKeyboardButton('Змінити', callback_data='change_criteria')
+    change_button = telebot.types.InlineKeyboardButton('Змінити один', callback_data='change_criteria')
     create_button = telebot.types.InlineKeyboardButton('Створити нові', callback_data='create_criteria')
-    markup.add(leave_button, change_button, create_button)
-    bot.send_message(message.chat.id, 'Поточні критерії: \n\n' + criteria_as_string(criteria) + '\n\nЧи влаштовують вони Вас?', reply_markup=markup)
+
+    add_button = telebot.types.InlineKeyboardButton('Додати один', callback_data='add_criterion')
+    remove_button = telebot.types.InlineKeyboardButton('Видалити один', callback_data='remove_criterion')
+
+    buttons_to_show_if_theres_criteria = [
+        leave_button,
+        change_button,
+        create_button,
+        add_button,
+        remove_button
+    ]
+
+    buttons_to_show_if_theres_no_criteria = [
+        create_button,
+        add_button
+    ]
+
+    if len(current_criteria) != 0:
+        markup.add(*buttons_to_show_if_theres_criteria)
+    else:
+        markup.add(*buttons_to_show_if_theres_no_criteria)
+
+    message_to_show_if_theres_criteria = 'Поточні критерії: \n\n' + criteria_as_string(criteria) + '\n\nЧи влаштовують вони Вас?'
+    message_to_show_if_theres_no_criteria = 'Ви видалили усі критерії!'
+
+    bot.send_message(
+        message.chat.id,
+        message_to_show_if_theres_criteria if len(current_criteria) != 0 else message_to_show_if_theres_no_criteria,
+        reply_markup=markup
+    )
 
 
 def request_count_of_criteria(message):
@@ -1104,6 +1200,56 @@ def set_new_value_to_criterion(message):
     show_current_criteria(msg, current_criteria)
 
 
+def remove_message_buttons(message):
+    bot.edit_message_reply_markup(message.chat.id, message.id)
+
+
+def set_new_message_text(message, text):
+    bot.edit_message_text(text, message.chat.id, message.id)
+
+
+def request_criterion_to_add(message):
+    msg = bot.send_message(message.chat.id, 'Введіть новий критерій, який хочете додати:')
+    bot.register_next_step_handler(msg, save_added_criterion)
+
+
+def save_added_criterion(message):
+    global current_criteria
+    current_criteria += [message.text]
+    msg = bot.send_message(message.chat.id, f'Критерій збережено: \n{len(current_criteria)}. {message.text}')
+    show_current_criteria(msg, current_criteria)
+
+
+def request_criterion_number_to_remove(message):
+    global current_criteria
+
+    if len(current_criteria) == 1:
+        del current_criteria[0]
+        msg = bot.send_message(message.chat.id, 'Останній критерій видалено!')
+        show_current_criteria(msg, current_criteria)
+        return
+
+    msg = bot.send_message(message.chat.id, 'Введіть номер критерію, який хочете видалити:')
+    bot.register_next_step_handler(msg, remove_criterion)
+
+
+def remove_criterion(message):
+    global current_criteria
+    try:
+        criterion_to_remove_number = int(message.text)
+        if criterion_to_remove_number <= 0 or criterion_to_remove_number > len(current_criteria):
+            raise ValueError
+    except ValueError:
+        msg = bot.send_message(message.chat.id, 'Введений номер критерію не валідний, спробуйте ще раз:')
+        bot.register_next_step_handler(msg, remove_criterion)
+        return
+
+    del current_criteria[criterion_to_remove_number - 1]
+
+    msg = bot.send_message(message.chat.id, 'Критерій видалено!')
+    show_current_criteria(msg, current_criteria)
+
+
 def add_criteria_to_db(message):
     global current_criteria
     i = 0
@@ -1134,12 +1280,13 @@ def start_voting(message):
 
 
 def send_messages(message):
-    # ids_jury = db.get_id_jury_from_contest(message)
-    # ids_participants = db.get_id_participants_from_contest(message)
-    # for id_jury in ids_jury:
-    #     bot.send_message(int(id_jury[0]), 'Голосування почалось!')
-    # for id_part in ids_participants:
-    #     bot.send_message(int(id_part[0]), 'Голосування почалось!')
+    ids_jury = db.get_id_jury_from_contest(message)
+    ids_participants = db.get_id_participants_from_contest(message)
+    for id_jury in ids_jury:
+        bot.send_message(int(id_jury[0]), 'Голосування почалось!')
+    for id_part in ids_participants:
+        bot.send_message(int(id_part[0]), 'Голосування почалось!')
+
     create('contest voting', message)
 
 
@@ -1253,6 +1400,7 @@ def send_next_criterion(message, criteria, ids_jury, part_id, max_sc, part_name)
                     callback_data=f'_{str(i)}_{str(id_jury[0])}_{part_name}_{str(crit[0])}'
                 )
                 markup.add(score_button)
+
             bot.send_message(int(id_jury[0]), "Оберіть бал:", reply_markup=markup)
 
 
@@ -1317,6 +1465,77 @@ def add_score_to_sheet(message, id_jury, sc, part_name, crit):
         'data': data
     }
     service.spreadsheets().values().batchUpdate(spreadsheetId=spreadsheet_id, body=body).execute()
+
+
+def change_points(message):
+    ids_participants = db.get_ids_of_participants(message)
+    markup = telebot.types.InlineKeyboardMarkup()
+    for id_part in ids_participants:
+        contest_button = telebot.types.InlineKeyboardButton(int(id_part[0]), callback_data=f'change_points_jury_{int(id_part[0])}')
+        markup.add(contest_button)
+    bot.send_message(message.chat.id, 'Оберіть команду (учасника), якій хочете змінити бали чи просто продивитись їх:', reply_markup=markup)
+
+
+def get_points_part(message, data):
+    start_row = 1
+    values = None
+    number_of_jury = db.get_number_of_jury(message)
+    number_of_criteria = db.get_number_of_criteria(message)
+    number_of_participants = db.get_number_of_participants(message)
+    spreadsheet_id = db.get_sheet_id(message)
+    name_jury = db.get_name_jury(int(message.chat.id))
+    part_name = db.get_name_participants(int(data))
+    service = build('sheets', 'v4', credentials=service_account.Credentials.from_service_account_file(
+        CREDENTIALS_FILE,
+        scopes=[
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ],
+    ))
+    range_names = [f"B1:B{(2 + number_of_jury) * number_of_participants}"]
+    result = service.spreadsheets().values().batchGet(
+        spreadsheetId=spreadsheet_id, ranges=range_names).execute()
+    ranges = result.get('valueRanges', [])
+    for range_data in ranges:
+        values = range_data.get('values', [])
+        for row in range(len(values)):
+            for col in range(len(values[row])):
+                if values[row][col] == part_name:
+                    start_row = row + 1
+
+    temp = int(start_row + 2)
+    range_names = [f"A{temp}:A{temp - 1 + number_of_jury}"]
+    result = service.spreadsheets().values().batchGet(
+        spreadsheetId=spreadsheet_id, ranges=range_names).execute()
+    ranges = result.get('valueRanges', [])
+    for range_data in ranges:
+        values = range_data.get('values', [])
+        for row in range(len(values)):
+            for col in range(len(values[row])):
+                if values[row][col] == name_jury:
+                    temp += int(row)
+
+    range_names = [f"B{temp}:{chr(1 + number_of_criteria + 64)}{temp}"]
+    result = service.spreadsheets().values().batchGet(
+        spreadsheetId=spreadsheet_id, ranges=range_names).execute()
+    ranges = result.get('valueRanges', [])
+    for range_data in ranges:
+        values = range_data.get('values', [])
+
+    propose_to_change(message, values)
+
+
+def propose_to_change(message, values):
+    criteria = db.get_ids_names_criteria(message)
+    max_sc = db.get_max_score(message)
+    markup = telebot.types.InlineKeyboardMarkup()
+    change_button = telebot.types.InlineKeyboardButton('Змінити', callback_data='change_points')
+    leave_button = telebot.types.InlineKeyboardButton('Залишити', callback_data='leave_points')
+    markup.add(change_button, leave_button)
+
+    criterion_as_string = '\n'.join([f'{i + 1}. {criterion[1]} - *{values[i]}/{max_sc}*;' for i, criterion in enumerate(criteria)])
+
+    bot.send_message(message.chat.id, f'{criterion_as_string} \n\nЯкщо Ви переглянули своє рішення щодо одного з критеріїв, Ви можете змінити його, натиснувши кнопку "Змінити". Якщо Вас усе влаштовує, натисніть кнопку "Залишити".', reply_markup=markup, parse_mode='Markdown')
 
 
 def propose_juri_to_change_points(message, id_jury):
@@ -1388,6 +1607,9 @@ def max_score(message):
 
 
 def create(title, message):
+    global organizer_table_title
+    organizer_table_title = title
+
     creds = service_account.Credentials.from_service_account_file(
         CREDENTIALS_FILE,
         scopes=[
@@ -1417,6 +1639,7 @@ def create(title, message):
         link = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit#gid=0"
         add_value_to_sheet(message, spreadsheet_id, service)
         bot.send_message(message.chat.id, f"Посилання на Google таблицю: {link}")
+        bot.send_message(message.chat.id, "Ви можете поділитись цим посиланням з іншими організаторами, якщо вони є!")
         bot.send_message(message.chat.id, "Напишіть, який максимальний балл на цьому конкурсі!")
         bot.register_next_step_handler(message, max_score)
     except HttpError as error:
@@ -1510,7 +1733,7 @@ def team_selection(message):
         else:
             bot.send_message(id_org, 'Учасників немає!')
             if len(list_of_participants_all) > 0:
-                score_rating(id_org)
+                score_rating(message)
     else:
         bot.send_message(message.chat.id, "Голосування ще не почалось! Натисніть на /startvoting")
 
@@ -1546,7 +1769,7 @@ def jury_awarding_score(message):
         bot.send_message(message.chat.id, 'Учасників немає!')
 
 
-def jury_criteria(message, part_id, part_name, current_criteria_index):
+def jury_criteria(message, part_name, current_criteria_index):
     criteria = db.get_ids_names_criteria(message)
     if current_criteria_index < len(criteria):
         crit = criteria[current_criteria_index]
@@ -1596,8 +1819,94 @@ def check_all_jury(message):
     return True
 
 
-def score_rating(id_org):
-    bot.send_message(id_org, 'Тут буде рейтинг')
+def score_rating(message):
+    markup = telebot.types.InlineKeyboardMarkup()
+    button = telebot.types.InlineKeyboardButton("Завершити", callback_data='end_contest')
+    markup.add(button)
+    bot.send_message(message.chat.id, 'Якщо Ви готові завершити голосування, натисніть на кнопку:', reply_markup=markup)
+
+
+def end_contest(message):
+    global team_scores
+
+    sh = sa.open(organizer_table_title)
+    wks = sh.worksheet('Sheet1')
+
+    number_of_criteria = db.get_number_of_criteria(message)
+    number_of_juries = db.get_number_of_jury(message)
+    number_of_participants = db.get_number_of_participants(message)
+
+    indent = 0
+    for i in range(number_of_participants):
+        team_name = wks.get(f'B{indent + 1}')
+        points = wks.get(f'B{indent + 3}:{ALPHABET[1 + number_of_criteria]}{indent + 2 + number_of_juries}')
+
+        team_name = team_name[0][0]
+
+        team_score = 0
+        for juri_points in points:
+            team_score += sum([int(point) for point in juri_points])
+
+        team_scores += [TeamScore(team_name, team_score)]
+        indent += 2 + number_of_juries
+
+    rated = sorted(team_scores, key=lambda team_sc: team_sc.score, reverse=True)
+
+    temp = indent + 2
+    wks.update(f'B{indent + 1}', 'Рейтинг')
+    wks.update(f'D{indent + 1}', 'Приз глядацький симпатій')
+    wks.update(f'A{indent + 2}', 'Місце')
+    wks.update(f'B{indent + 2}', 'Команда')
+    wks.update(f'C{indent + 2}', 'Кількість балів')
+    indent += 3
+    for i, team_score in enumerate(rated):
+        wks.update(f'A{indent}', i + 1)
+        wks.update(f'B{indent}', team_score.name)
+        wks.update(f'C{indent}', team_score.score)
+        indent += 1
+
+    if int(db.get_voting_status(db.get_contest_id(message))) == 2:
+        win = people_choice_award(message)
+        wks.update(f'D{temp}', win)
+
+    bot.send_message(message.chat.id, 'Рейтинг складено, перевірте таблицю.')
+
+    team_scores = []
+    delete_all(message)
+
+
+def people_choice_award(message):
+    ids_participants = db.get_ids_of_participants_end(message)
+    max_average = 0
+    win = 0
+    for id_part in ids_participants:
+        temp = db.get_voting_scores(int(id_part[0])) / db.get_number_of_voters(int(id_part[0]))
+        if temp > max_average:
+            max_average = float(temp)
+            win = int(id_part[0])
+
+    return str(db.get_name_participants(win))
+
+
+def delete_all(message):
+    ids_jury = db.get_id_jury_from_contest(message)
+    for id_jury in ids_jury:
+        db.delete_from_tables_id(int(id_jury[0]))
+        db.delete_from_users_id(int(id_jury[0]))
+
+    ids_participants = db.get_ids_of_participants_all(message)
+    for id_part in ids_participants:
+        db.delete_from_tables_id(int(id_part[0]))
+        db.delete_from_users_id(int(id_part[0]))
+
+    ids_viewer = db.get_ids_of_viewer(message)
+    for id_viewer in ids_viewer:
+        db.delete_from_tables_id(int(id_viewer[0]))
+        db.delete_from_users_id(int(id_viewer[0]))
+
+    db.delete_contest(db.get_contest_id(message))
+    db.delete_from_tables(message)
+    db.delete_from_users(message)
 
 
 @bot.callback_query_handler(func=lambda call: True)
@@ -1617,6 +1926,7 @@ def handle_callback_query(call):
         db.add_user_viewer(call.message)
         bot.send_message(call.message.chat.id, 'Введіть Ваш нікнейм.')
         bot.register_next_step_handler(call.message, process_nickname_step)
+        remove_message_buttons(call.message)
     elif call.data == 'organizer':
         db.add_user(call.message, "organizer")
         db.create_table_organizer()
@@ -1624,6 +1934,7 @@ def handle_callback_query(call):
         db.create_table_organizer()
         bot.send_message(call.message.chat.id, 'Введіть Ваше ім\'я!')
         bot.register_next_step_handler(call.message, process_name_step)
+        remove_message_buttons(call.message)
         return
     elif call.data == 'jury':
         db.add_user(call.message, "jury")
@@ -1631,6 +1942,7 @@ def handle_callback_query(call):
         db.add_user_jury(call.message)
         bot.send_message(call.message.chat.id, 'Введіть Ваше ім\'я!')
         bot.register_next_step_handler(call.message, process_name_step)
+        remove_message_buttons(call.message)
         return
     elif call.data == 'participant':
         db.add_user(call.message, "participant")
@@ -1638,23 +1950,27 @@ def handle_callback_query(call):
         db.add_user_participant(call.message)
         bot.send_message(call.message.chat.id, 'Введіть команду, яку Ви представляєте.')
         bot.register_next_step_handler(call.message, process_team_step)
+        remove_message_buttons(call.message)
         return
 
     if call.data == 'yes':
         check = True
         bot.send_message(call.message.chat.id, 'Введіть компанію, яку Ви представляєте.')
         bot.register_next_step_handler(call.message, process_company_step)
+        remove_message_buttons(call.message)
         return
     elif call.data == 'no':
         bot.reply_to(call.message, 'Щоб Ваші бали на конкурсі були АНОНІМізовані, введіть нікмейм!')
         bot.register_next_step_handler(call.message, process_nickname_step)
+        remove_message_buttons(call.message)
         return
 
     if call.data == 'add_contest':
         bot.send_message(call.message.chat.id, 'Введіть назву конкурсу.')
         bot.register_next_step_handler(call.message, process_contest_name_step)
-    elif call.data == 'join_contest':
-        process_contest_step(call.message)
+        remove_message_buttons(call.message)
+    elif call.data == 'no_contest':
+        bot.send_message(call.message.chat.id, "Коли захочете додати конкурс, натисніть /addcontest")
 
     if call.data == 'start_registration':
         if db.is_organizer(call.message):
@@ -1663,8 +1979,10 @@ def handle_callback_query(call):
             add_criteria(call.message)
         else:
             bot.send_message(call.message.chat.id, 'Тільки організатори можуть почати реєстрацію.')
+        remove_message_buttons(call.message)
     elif call.data == 'dont_start_registration':
         bot.send_message(call.message.chat.id, 'Введіть /startregistration , коли захочете почати реєстрацію!')
+        remove_message_buttons(call.message)
 
     if call.data == 'start_voting':
         if db.is_organizer(call.message):
@@ -1678,8 +1996,10 @@ def handle_callback_query(call):
             types_of_voting(call.message)
         else:
             bot.send_message(call.message.chat.id, 'Тільки організатори можуть почати реєстрацію.')
+        remove_message_buttons(call.message)
     elif call.data == 'dont_start_voting':
         bot.send_message(call.message.chat.id, 'Введіть /startvoting , коли захочете почати голосування!')
+        remove_message_buttons(call.message)
 
     if call.data.startswith('join_contest_') and call.data[-1].isdigit() and db.get_role_from_users(call.message) == 'jury':
         contest_id = int(call.data.split('_')[2])
@@ -1690,6 +2010,7 @@ def handle_callback_query(call):
             bot.send_message(call.message.chat.id, "Реєстрація на цей конкурс недоступна!")
             db.delete_from_tables(call.message)
             db.delete_from_users(call.message)
+        remove_message_buttons(call.message)
     elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and db.get_role_from_users(call.message) == 'participant':
         contest_id = int(call.data.split('_')[2])
         if db.get_registration_status(contest_id):
@@ -1699,6 +2020,7 @@ def handle_callback_query(call):
             bot.send_message(call.message.chat.id, "Реєстрація на цей конкурс недоступна!")
             db.delete_from_tables(call.message)
             db.delete_from_users(call.message)
+        remove_message_buttons(call.message)
     elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and db.get_role_from_users(call.message) == 'viewer':
         contest_id = int(call.data.split('_')[2])
         if db.get_voting_status(contest_id) > 0:
@@ -1708,44 +2030,48 @@ def handle_callback_query(call):
             bot.send_message(call.message.chat.id, "Ви зможете приєднатись до цього конкурсу тільки під час голосування!")
             db.delete_from_tables(call.message)
             db.delete_from_users(call.message)
-    elif call.data.startswith('join_contest_') and call.data[-1].isdigit() and db.get_role_from_users(call.message) == 'organizer':
-        contest_id = int(call.data.split('_')[2])
-        if opportunity_join(contest_id):
-            db.set_id_organizer(call.message, contest_id)
-            bot.send_message(call.message.chat.id, 'Ви зареєстровані')
-        else:
-            bot.send_message(call.message.chat.id, "Вже максимальна кількість організаторів! "
-                                                   "Ви не можете приєднатись!\n"
-                                                   "Почните реєстрацію заново, натиснувши /register")
-            db.delete_from_tables(call.message)
-            db.delete_from_users(call.message)
+        remove_message_buttons(call.message)
 
     if call.data.startswith('voting_'):
         type_of_voting = int(call.data.split('_')[1])
         db.start_voting(call.message, type_of_voting)
         bot.send_message(call.message.chat.id, 'Голосування почалось!')
         send_messages(call.message)
+        remove_message_buttons(call.message)
 
     if call.data == 'add_criteria':
         db.create_table_criteria()
         start_criteria(call.message)
+        remove_message_buttons(call.message)
     elif call.data == 'dont_add_criteria':
         bot.send_message(call.message.chat.id, 'Введіть /criteria , коли захочете додати критерії!')
+        remove_message_buttons(call.message)
     elif call.data == 'process_startup_criteria':
         project_type = 'startup'
         current_criteria = default_startup_criteria
         show_current_criteria(call.message, current_criteria)
+        remove_message_buttons(call.message)
     elif call.data == 'process_design_criteria':
         project_type = 'design'
         current_criteria = default_design_criteria
         show_current_criteria(call.message, current_criteria)
+        remove_message_buttons(call.message)
     elif call.data == 'create_criteria':
         request_count_of_criteria(call.message)
+        remove_message_buttons(call.message)
     elif call.data == 'change_criteria':
         request_criteria_number(call.message)
+        remove_message_buttons(call.message)
     elif call.data == 'leave_criteria':
         db.create_table_criteria()
         add_criteria_to_db(call.message)
+        remove_message_buttons(call.message)
+    elif call.data == 'add_criterion':
+        request_criterion_to_add(call.message)
+        remove_message_buttons(call.message)
+    elif call.data == 'remove_criterion':
+        request_criterion_number_to_remove(call.message)
+        remove_message_buttons(call.message)
 
     if call.data.startswith('team_'):
         data = call.data.split('_')
@@ -1756,7 +2082,9 @@ def handle_callback_query(call):
         elif db.get_voting_status(db.get_contest_id(call.message)) == 2:
             current_criteria_index = 0
             db.set_second_voting(call.message, db.get_second_voting(call.message) + 1)
-            jury_criteria(call.message, part_id, part_name, current_criteria_index)
+            jury_criteria(call.message, part_name, current_criteria_index)
+
+        set_new_message_text(call.message, 'Виступає команда: ' + part_name)
 
     if call.data.startswith('_'):
         data = call.data.split('_')
@@ -1786,13 +2114,16 @@ def handle_callback_query(call):
 
             send_next_criterion(call.message, criteria, ids_jury, part_id, db.get_max_score(call.message), part_name)
         elif db.get_voting_status(db.get_contest_id(call.message)) == 2:
-            jury_criteria(call.message, part_id, part_name, current_criterion_index)
+            jury_criteria(call.message, part_name, current_criterion_index)
+        remove_message_buttons(call.message)
+        set_new_message_text(call.message, 'Обраний бал - ' + str(sc))
 
     if call.data.startswith('jury_voting_'):
         if call.data.split('_')[2]:
             jury_awarding_score(call.message)
         elif not call.data.split('_')[2]:
             bot.send_message(call.message.chat.id, "Натисніть /startvotingjury , щоб почати голосування!")
+        remove_message_buttons(call.message)
 
     if call.data.startswith('secondvoting_'):
         data = call.data.split('_')
@@ -1801,20 +2132,24 @@ def handle_callback_query(call):
             jury_awarding_score(call.message)
         elif int(data[1]) == 0:
             if check_all_jury(call.message):
-                score_rating(db.get_id_organizer(call.message))
+                score_rating(call.message)
+        remove_message_buttons(call.message)
 
     if call.data == 'change_points':
         ask_criterion_to_change(call.message)
+        remove_message_buttons(call.message)
     if call.data == 'leave_points':
         criteria_points = []
         current_criteria_points_idx = 0
         current_part_name = None
+        remove_message_buttons(call.message)
 
     if call.data.startswith('criteria_'):
         if call.data.split('_')[1] == 'delete':
             db.delete_criteria(call.message)
         elif call.data.split('_')[1] == 'no':
             pass
+        remove_message_buttons(call.message)
 
     if call.data.startswith('choice_award_'):
         data = call.data.split('_')[2]
@@ -1823,16 +2158,19 @@ def handle_callback_query(call):
             performed_teams(call.message)
         elif not bool(data):
             bot.send_message(call.message.chat.id, "Натисніть /choice_award , якщо будете готові проголосувати!")
+        remove_message_buttons(call.message)
 
     if call.data.startswith('award_team_'):
         data = call.data.split('_')[2]
         send_scores(call.message.chat.id, data, db.get_max_score(call.message))
+        remove_message_buttons(call.message)
 
     if call.data.startswith('award_choice_score_'):
         score = call.data.split('_')[3]
         id_part = call.data.split('_')[4]
         db.set_voting_scores(id_part, int(db.get_voting_scores(id_part)) + int(score))
         db.set_number_of_voters(id_part, int(db.get_number_of_voters(id_part)) + 1)
+        remove_message_buttons(call.message)
 
     if call.data.startswith('delete_contest_'):
         data = call.data.split('_')[2]
@@ -1842,6 +2180,14 @@ def handle_callback_query(call):
             db.delete_criteria_from_id(int(data))
             db.delete_contest(int(data))
             bot.send_message(call.message.chat.id, "Конкурс видалено!")
+        remove_message_buttons(call.message)
+
+    if call.data.startswith('change_points_jury_'):
+        data = call.data.split('_')[3]
+        get_points_part(call.message, data)
+
+    if call.data == 'end_contest':
+        end_contest(call.message)
 
 
 bot.polling()
